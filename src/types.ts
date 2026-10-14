@@ -30,7 +30,10 @@ export interface StudentInsight { headline: string; summary: string; outcomes: O
 export type ProgressStatus = 'not-assessed' | 'current' | 'pending' | 'unavailable';
 export interface TaskEvidence { sourceId: string; quote: string }
 export interface TaskCriterionResult { id: string; label: string; status: 'not-started' | 'partial' | 'complete'; evidence: TaskEvidence[] }
-export interface SafeguardingFinding { category: 'off-task' | 'inappropriate' | 'danger'; severity: 'attention' | 'urgent'; reason: string; evidence: TaskEvidence[] }
-export interface TaskAssessment { progress: number | null; progressEvidence: string[]; criteria: TaskCriterionResult[]; alerts: SafeguardingFinding[]; assessedAt: string }
-export interface Participant { id: string; runId: string; name: string; createdAt: string; updatedAt: string; paused: boolean; messages: Message[]; progress: number | null; progressStatus: ProgressStatus; progressEvidence: string[]; taskProgressMeta?: { criteria: TaskCriterionResult[]; assessedAt: string }; artifacts: Artifact[]; insights?: StudentInsight }
+export type InteractionStatus = 'getting-started' | 'on-track' | 'deepening' | 'needs-guidance' | 'struggling' | 'discouraged' | 'frustrated' | 'off-task';
+/** Advisory teacher-only read of how a student is engaging; evidence must be student-owned. */
+export interface InteractionAssessment { status: InteractionStatus; summary: string; evidence: TaskEvidence[] }
+export interface SafeguardingFinding { category: 'off-task' | 'inappropriate' | 'danger' | 'support-needed'; severity: 'attention' | 'urgent'; reason: string; evidence: TaskEvidence[] }
+export interface TaskAssessment { progress: number | null; progressEvidence: string[]; criteria: TaskCriterionResult[]; interaction: InteractionAssessment | null; alerts: SafeguardingFinding[]; assessedAt: string }
+export interface Participant { id: string; runId: string; name: string; createdAt: string; updatedAt: string; paused: boolean; messages: Message[]; progress: number | null; progressStatus: ProgressStatus; progressEvidence: string[]; taskProgressMeta?: { criteria: TaskCriterionResult[]; assessedAt: string }; interaction?: InteractionAssessment; artifacts: Artifact[]; insights?: StudentInsight }
 export interface Teacher { id: string; name: string; email: string; admin: boolean; customInstructions: string }

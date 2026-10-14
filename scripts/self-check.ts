@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { complete, generateImage, listModels, validateProvider } from '../src/providers';
-import { createApp, MAX_JSON_BODY, SERVER_IDLE_SECONDS } from '../src/server';
+import { complete, generateImage, listModels, PROVIDER_LIMITS, validateProvider } from '../src/providers';
+import { createApp, MAX_JSON_BODY, SERVER_IDLE_SECONDS, type AppHandle } from '../src/server';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { parseTaskAssessment, taskCriteria } from '../src/assessment';
 import { decryptSecret, encryptSecret, verifyPassword } from '../src/auth';
 import { listAlerts, recordAlerts } from '../src/safeguarding';
 import { runFromRow, participantFromRow, type ParticipantRow, type ProviderRow, type RunRow, type TeacherRow } from '../src/db';
-import { isRecord } from '../src/validate';
+import { asTaskAssessment, isRecord } from '../src/validate';
+import { uid } from '../public/tools.js';
 
 // One runnable check: isolated synthetic records only; no fleet credentials or local AI inference.
 function record(value: unknown): Record<string, unknown> {
@@ -34,7 +35,7 @@ const oauthKey = crypto.randomUUID(), refreshToken = crypto.randomUUID(), access
 const googleSettings = { clientId: `${crypto.randomUUID()}.apps.googleusercontent.com`, clientSecret: crypto.randomUUID(), projectId: 'classroom-fixture' };
 let oauthExchangeCount = 0, googleRefreshCount = 0, assessmentCalls = 0, rejectOAuth = false;
 let expectedChallenge = '';
-let assessmentReply = (payload: Record<string, unknown>): unknown => ({ criteria: array(payload.canonicalCriteria).map(item => ({ id: record(item).id, status: 'not-started', evidence: [] })), alerts: [] });
+let assessmentReply = (payload: Record<string, unknown>): unknown => ({ criteria: array(payload.canonicalCriteria).map(item => ({ id: record(item).id, status: 'not-started', evidence: [] })), interaction: null, alerts: [] });
 const fixtureFetch = async (input: RequestInfo | URL, options?: RequestInit): Promise<Response> => {
   const url = input instanceof Request ? input.url : String(input);
   if (url === 'https://openrouter.ai/api/v1/auth/keys') {
@@ -112,9 +113,12 @@ const fixtureFetch = async (input: RequestInfo | URL, options?: RequestInit): Pr
 globalThis.fetch = Object.assign(fixtureFetch, { preconnect: nativeFetch.preconnect });
 const config = validateProvider({ id: 'fixture', name: 'Protocol fixture', kind: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'fixture-model', imageModel: 'gpt-image-1', apiKey: fixtureKey, contextChars: 24000, maxOutputTokens: 512 });
 const directory = await mkdtemp(join(tmpdir(), 'classroomai-self-check-'));
-const baseUrl = 'http://127.0.0.1:9272';
-let app = await createApp({ dataDir: directory, baseUrl, geminiOAuth: googleSettings });
-let server = Bun.serve({ hostname: '127.0.0.1', port: 9272, idleTimeout: SERVER_IDLE_SECONDS, maxRequestBodySize: MAX_JSON_BODY, fetch: app.fetch });
+// Use an OS-assigned port without releasing it between allocation and startup.
+let app: AppHandle;
+let server = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: SERVER_IDLE_SECONDS, maxRequestBodySize: MAX_JSON_BODY, fetch: (req, server) => app.fetch(req, server) });
+const port = server.port;
+const baseUrl = `http://127.0.0.1:${port}`;
+app = createApp({ dataDir: directory, baseUrl, geminiOAuth: googleSettings });
 class Client {
   cookie = '';
   async call(path: string, method = 'GET', body?: unknown, expected = 200): Promise<Record<string, unknown>> {
@@ -180,6 +184,20 @@ try {
   assert.throws(() => validateProvider({...config,baseUrl:'http://public.example/v1'}), /https|Insecure/i);
   assert.throws(() => validateProvider({...config,baseUrl:'https://user:password@provider.example/v1'}), /credentials/i);
   assert.throws(() => validateProvider({...config,maxOutputTokens:-1}), /positive|range|between/i);
+  const shortReplyConfig = validateProvider({...config,maxOutputTokens:500,contextChars:3000});
+  assert.equal(shortReplyConfig.maxOutputTokens,500);
+  assert.equal(shortReplyConfig.contextChars,3000);
+  const presetConfig = validateProvider({...config,maxOutputTokens:undefined,contextChars:undefined});
+  assert.equal(presetConfig.maxOutputTokens,PROVIDER_LIMITS.defaultMaxOutputTokens,'Unlisted endpoints use the generic output budget');
+  assert.equal(presetConfig.contextChars,PROVIDER_LIMITS.defaultContextChars,'Unlisted endpoints use the generic context budget');
+  const deepseekConfig = validateProvider({name:'DeepSeek',kind:'openai',baseUrl:'https://api.deepseek.com/v1',model:'deepseek-flash'});
+  assert.equal(deepseekConfig.maxOutputTokens,32000,'The DeepSeek endpoint applies its own output budget');
+  assert.equal(deepseekConfig.contextChars,240000,'The DeepSeek endpoint applies its own context budget');
+  const maxedConfig = validateProvider({...config,maxOutputTokens:PROVIDER_LIMITS.maxOutputTokens,contextChars:PROVIDER_LIMITS.maxContextChars});
+  assert.equal(maxedConfig.maxOutputTokens,PROVIDER_LIMITS.maxOutputTokens);
+  assert.equal(maxedConfig.contextChars,PROVIDER_LIMITS.maxContextChars);
+  assert.throws(() => validateProvider({...config,maxOutputTokens:PROVIDER_LIMITS.maxOutputTokens+1}), /between 1 and 128000/);
+  assert.throws(() => validateProvider({...config,contextChars:PROVIDER_LIMITS.maxContextChars+1}), /between 1000 and 2000000/);
   await assert.rejects(complete({...config,contextChars:1000}, 'x'.repeat(1001), [{role:'user',content:'hello'}]), /context|limit|large/i);
   malformedProvider = true;
   await assert.rejects(complete(config, 'Tutor.', [{role:'user',content:'Hello'}]), /JSON/i);
@@ -193,10 +211,16 @@ try {
   console.log('PASS provider protocols, context/URL bounds, image support, safe errors');
 
   assert.equal((await stranger.call('/api/status')).setupRequired, true);
+  assert.equal((await stranger.call('/api/status')).teacherSignupAllowed, true, 'Local first-run account creation must remain available');
   await stranger.denied('/api/providers');
   const password = `${crypto.randomUUID()}Aa1!`;
-  await teacher.call('/api/setup', 'POST', {name:'Synthetic teacher',email:'teacher@example.test',password});
+  await stranger.call('/api/signup','POST',{name:'Early signup',email:'early@example.test',password},400);
+  const setupResponses = await Promise.all([1,2].map(() => nativeFetch(baseUrl+'/api/setup', {method:'POST',headers:{origin:baseUrl,'content-type':'application/json'},body:JSON.stringify({name:'Synthetic teacher',email:'teacher@example.test',password})})));
+  assert.deepEqual(setupResponses.map(response=>response.status).sort(),[200,400],'Concurrent first-run setup must create exactly one administrator');
+  teacher.cookie = setupResponses.find(response=>response.status===200)!.headers.getSetCookie().map(value=>value.split(';')[0]).join('; ');
   assert.equal((await stranger.call('/api/status')).setupRequired, false);
+  assert.equal((await stranger.call('/api/status')).teacherSignupAllowed, true, 'The local browser is offered signup once the administrator exists');
+  assert.deepEqual(array((await teacher.call('/api/teachers')).teachers).map(item=>text(record(item).email)),['teacher@example.test'],'A signup attempted before first-run setup must not create an account');
   await stranger.denied('/api/setup', 'POST', {name:'Second admin',email:'second@example.test',password});
   await teacher.call('/api/teachers','POST',{name:'Other teacher',email:'other@example.test',password});
   await otherTeacher.call('/api/login','POST',{email:'other@example.test',password});
@@ -241,6 +265,57 @@ try {
   })).space);
   savedSpaceId = text(space.id);
   await otherTeacher.denied(`/api/spaces/${savedSpaceId}`);
+
+  // Self-service teacher signup: machine-local, ordinary accounts only, and no reach into
+  // another teacher's private Space or the administrator's provider settings.
+  const signupEmail = `Signup-${crypto.randomUUID()}@Example.test`;
+  const accountsBefore = array((await teacher.call('/api/teachers')).teachers).length;
+  const newcomer = new Client();
+  const signedUp = record((await newcomer.call('/api/signup','POST',{name:'Synthetic signup teacher',email:signupEmail,password,admin:true})).teacher);
+  assert.equal(signedUp.admin,false,'A client-supplied admin flag must never elevate a signup account');
+  assert.equal(signedUp.email,signupEmail.toLowerCase(),'Signup normalizes the email like first-run setup');
+  assert(!JSON.stringify(signedUp).includes(password),'The signup response must never echo the password');
+  assert.equal(array((await teacher.call('/api/teachers')).teachers).length,accountsBefore+1);
+  assert.equal(text(record((await newcomer.call('/api/status')).teacher).email),signupEmail.toLowerCase(),'Signup signs the new teacher in');
+  await newcomer.denied('/api/providers','PUT',config);
+  await newcomer.denied('/api/providers/models','POST',{name:'Probe',kind:'openai',baseUrl:'http://127.0.0.1:1/v1',apiKey:fixtureKey,model:'fixture-model'});
+  await newcomer.denied('/api/teachers');
+  await newcomer.denied(`/api/spaces/${savedSpaceId}`);
+
+  // Rejected shapes never leave a partial account behind.
+  for (const [rejected, expected] of [
+    [{name:'Synthetic signup teacher',email:signupEmail.toUpperCase(),password},409],
+    [{name:'Synthetic signup teacher',email:`not-an-email-${crypto.randomUUID()}`,password},400],
+    [{name:'   ',email:`blank-name-${crypto.randomUUID()}@example.test`,password},400],
+    [{name:'Short password',email:`short-${crypto.randomUUID()}@example.test`,password:crypto.randomUUID().slice(0,3)},400],
+    [{name:'Missing password',email:`missing-${crypto.randomUUID()}@example.test`},400],
+  ] as const) {
+    const response = await nativeFetch(baseUrl+'/api/signup',{method:'POST',headers:{origin:baseUrl,'content-type':'application/json'},body:JSON.stringify(rejected)});
+    assert.equal(response.status,expected,'Rejected signup must report the correct validation or duplicate-email error');
+  }
+  assert.equal(array((await teacher.call('/api/teachers')).teachers).length,accountsBefore+1,'Rejected signups must not create accounts');
+
+  // Two signups racing one address: the UNIQUE email index decides and exactly one wins.
+  const raceEmail = `race-${crypto.randomUUID()}@example.test`;
+  const raced = JSON.stringify({name:'Synthetic racer',email:raceEmail,password});
+  const racers = await Promise.all([1,2].map(()=>nativeFetch(baseUrl+'/api/signup',{method:'POST',headers:{origin:baseUrl,'content-type':'application/json'},body:raced})));
+  assert.deepEqual(racers.map(item=>item.status).sort(),[200,409],'Concurrent signups for one email must yield exactly one account');
+  assert.equal(array((await teacher.call('/api/teachers')).teachers).map(item=>text(record(item).email)).filter(item=>item===raceEmail).length,1,'The losing racer must not create a second account');
+
+  // The machine-local gate: the real peer address and the addressed hostname, never headers.
+  const remoteSignup = await app.fetch(new Request(baseUrl+'/api/signup',{method:'POST',headers:{origin:baseUrl,'content-type':'application/json','x-forwarded-for':'127.0.0.1','x-real-ip':'127.0.0.1'},body:JSON.stringify({name:'Remote signup',email:`remote-${crypto.randomUUID()}@example.test`,password})}),{requestIP:()=>({address:'203.0.113.9'})});
+  assert.equal(remoteSignup.status,403,'A forwarded header must never satisfy the loopback requirement');
+  const remoteStatus = record(await (await app.fetch(new Request(baseUrl+'/api/status',{headers:{'x-forwarded-for':'127.0.0.1'}}),{requestIP:()=>({address:'203.0.113.9'})})).json());
+  assert.equal(remoteStatus.teacherSignupAllowed,false,'A remote browser is never offered signup');
+  const rebindHeaders = {origin:'http://rebind.attacker.test',host:'rebind.attacker.test','content-type':'application/json'};
+  const reboundSignup = await app.fetch(new Request('http://rebind.attacker.test/api/signup',{method:'POST',headers:rebindHeaders,body:JSON.stringify({name:'Rebinding signup',email:`rebind-${crypto.randomUUID()}@example.test`,password})}));
+  assert.equal(reboundSignup.status,403,'A rebinding hostname with a loopback peer must not reach signup');
+  const reboundSetup = await app.fetch(new Request('http://rebind.attacker.test/api/setup',{method:'POST',headers:rebindHeaders,body:JSON.stringify({name:'Rebinding admin',email:`rebind-${crypto.randomUUID()}@example.test`,password})}));
+  assert.equal(reboundSetup.status,403,'First-run setup must reject a hostname that is not this machine');
+  assert.equal(record(await (await app.fetch(new Request('http://rebind.attacker.test/api/status',{headers:{host:'rebind.attacker.test'}}))).json()).teacherSignupAllowed,false,'A rebinding page is never offered signup');
+  assert.equal(array((await teacher.call('/api/teachers')).teachers).length,accountsBefore+2,'Refused, remote and rebinding signups must not create accounts');
+  console.log('PASS machine-local teacher signup, ordinary accounts, duplicate/race handling and rebinding boundary');
+
   const duplicate = record((await teacher.call(`/api/spaces/${savedSpaceId}/duplicate`,'POST',{})).space);
   assert.notEqual(duplicate.id,space.id);
   const beforePreview = array((await teacher.call('/api/runs')).runs).length;
@@ -344,7 +419,17 @@ try {
   await studentA.denied(`/api/runs/${savedRunId}/dashboard`);
   await otherTeacher.denied(`/api/runs/${savedRunId}/dashboard`);
   await studentA.denied('/api/providers');
-  const requestId = crypto.randomUUID();
+  // Plain LAN HTTP is not a secure context: the shared uid must work from getRandomValues alone.
+  const browserCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto')!;
+  try {
+    const pattern = Uint8Array.from([0, 1, 15, 16, 254, 255, ...Array(10).fill(0)]);
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: { getRandomValues: (array: Uint8Array) => { array.set(pattern); return array; } } });
+    assert.equal(uid(), '00010f10feff' + '0'.repeat(20), 'Browser uid must render getRandomValues bytes as fixed-width lowercase hex');
+    assert.match(uid(), /^[0-9a-f]{32}$/);
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', browserCrypto);
+  }
+  const requestId = uid();
   let history = array((await studentA.call('/api/student/chat','POST',{message:'I can make seven groups of eight.',requestId})).messages);
   assert.equal(history.length,2);
   const callsAfterTurn = modelCalls;
@@ -540,7 +625,7 @@ try {
   const taskParticipant = participantFromRow(stateDb,participantRow), canonical = taskCriteria(taskRun);
   const studentMessage = taskParticipant.messages.find(message=>message.role==='user')!;
   const assistantMessage = taskParticipant.messages.find(message=>message.role==='assistant')!;
-  const validPartial = {criteria:canonical.map((criterion,index)=>({id:criterion.id,status:index===0?'partial':'not-started',evidence:index===0?[{sourceId:studentMessage.id,quote:studentMessage.content}]:[]})),alerts:[]};
+  const validPartial = {criteria:canonical.map((criterion,index)=>({id:criterion.id,status:index===0?'partial':'not-started',evidence:index===0?[{sourceId:studentMessage.id,quote:studentMessage.content}]:[]})),interaction:null,alerts:[]};
   assert.equal(parseTaskAssessment(validPartial,taskRun,taskParticipant).progress,25);
   const forged = structuredClone(validPartial);forged.criteria[0]!.evidence=[{sourceId:assistantMessage.id,quote:assistantMessage.content}];
   assert.throws(()=>parseTaskAssessment(forged,taskRun,taskParticipant),/admissible/);
@@ -554,11 +639,31 @@ try {
   assert(parseTaskAssessment(assistantAlert,taskRun,taskParticipant).alerts.some(alert=>alert.evidence.some(source=>source.sourceId===assistantMessage.id)),'Unsafe assistant output may be cited for review, never for student completion');
   assert.throws(()=>parseTaskAssessment({...assistantAlert,alerts:[{...assistantAlert.alerts[0]!,reason:'Synthetic concern without identifying the source.'}]},taskRun,taskParticipant),Error,'An assistant-output alert must identify the AI, not blame the student');
   const shellParticipant = {...taskParticipant,messages:[],artifacts:[{id:'shell',type:'document',title:'Complete task',data:{text:''},updatedAt:new Date().toISOString()}]};
-  assert.equal(parseTaskAssessment({criteria:canonical.map(criterion=>({id:criterion.id,status:'not-started',evidence:[]})),alerts:[]},taskRun,shellParticipant).progress,null,'An empty saved shell cannot establish work');
+  assert.equal(parseTaskAssessment({criteria:canonical.map(criterion=>({id:criterion.id,status:'not-started',evidence:[]})),interaction:null,alerts:[]},taskRun,shellParticipant).progress,null,'An empty saved shell cannot establish work');
+  const discouragedMessage = {...studentMessage,content:"I can't do this task. I'm no good at it."};
+  const discouragedParticipant = {...taskParticipant,messages:[discouragedMessage,assistantMessage]};
+  const blockedAssessment = {
+    criteria:canonical.map(criterion=>({id:criterion.id,status:'not-started',evidence:[]})),
+    interaction:{status:'discouraged',summary:'The learner expresses task-specific discouragement and needs a teacher check-in.',evidence:[{sourceId:discouragedMessage.id,quote:discouragedMessage.content}]},alerts:[],
+  };
+  const blocked = parseTaskAssessment(blockedAssessment,taskRun,discouragedParticipant);
+  assert.equal(blocked.alerts.length,1,'A validated discouraged headline must not silently lose its support alert');
+  assert.equal(blocked.alerts[0]!.category,'support-needed');
+  assert.equal(blocked.alerts[0]!.severity,'attention','Task discouragement is not an urgent danger classification');
+  const crowdedMessages = Array.from({length:20},(_,index)=>({...studentMessage,id:`crowded-${index}`,content:`Synthetic conduct concern ${index}.`}));
+  const crowded = parseTaskAssessment({...blockedAssessment,alerts:crowdedMessages.map(message=>({category:'inappropriate',severity:'attention',reason:'Synthetic conduct evidence for teacher review.',evidence:[{sourceId:message.id,quote:message.content}]}))},taskRun,{...discouragedParticipant,messages:[...discouragedParticipant.messages,...crowdedMessages]});
+  assert.equal(crowded.alerts.filter(alert=>alert.category==='support-needed').length,1,'A full model findings list must not silently suppress the derived support signal');
+  assert.equal(asTaskAssessment(crowded).alerts.length,21,'The complete findings list remains readable after storage');
+  assert.throws(()=>parseTaskAssessment({...blockedAssessment,interaction:{...blockedAssessment.interaction,evidence:[{sourceId:assistantMessage.id,quote:assistantMessage.content}]}},taskRun,discouragedParticipant),Error,'Assistant encouragement cannot establish learner interaction');
+  assert.throws(()=>parseTaskAssessment({...blockedAssessment,interaction:{...blockedAssessment.interaction,evidence:[{sourceId:discouragedMessage.id,quote:'Invented student claim'}]}},taskRun,discouragedParticipant),Error,'Interaction labels require exact student evidence');
+  assert.throws(()=>parseTaskAssessment({...blockedAssessment,interaction:{...blockedAssessment.interaction,status:'off-task'}},taskRun,discouragedParticipant),Error,'A single difficulty statement is not sustained off-task behavior');
+  assert.throws(()=>parseTaskAssessment({...blockedAssessment,alerts:[{...blocked.alerts[0]!,severity:'urgent'}]},taskRun,discouragedParticipant),Error,'Support-needed must not silently become an urgent safety flag');
+  const clarificationMessage = {...studentMessage,content:'Can you clarify what the first step is asking me to do?'};
+  assert.equal(parseTaskAssessment({...blockedAssessment,interaction:{status:'needs-guidance',summary:'The learner asks a normal task clarification.',evidence:[{sourceId:clarificationMessage.id,quote:clarificationMessage.content}]}},taskRun,{...taskParticipant,messages:[clarificationMessage]}).alerts.length,0,'A productive clarification is not automatically a support or safety alert');
   assessmentReply = payload => {
     const transcript = array(payload.transcript).map(record), work = array(payload.savedWork).map(record), source = work.find(item=>text(item.text).includes('Evidence complete'));
     const danger = transcript.find(item=>item.role==='student'&&item.content==='Fixture: I will hurt myself tonight.');
-    return {criteria:array(payload.canonicalCriteria).map(item=>({id:record(item).id,status:source?'complete':'not-started',evidence:source?[{sourceId:source.sourceId,quote:'Evidence complete'}]:[]})),alerts:danger?[{category:'danger',severity:'urgent',reason:'Possible self-harm intent; teacher safeguarding review required.',evidence:[{sourceId:danger.sourceId,quote:danger.content}]}]:[]};
+    return {criteria:array(payload.canonicalCriteria).map(item=>({id:record(item).id,status:source?'complete':'not-started',evidence:source?[{sourceId:source.sourceId,quote:'Evidence complete'}]:[]})),interaction:null,alerts:danger?[{category:'danger',severity:'urgent',reason:'Possible self-harm intent; teacher safeguarding review required.',evidence:[{sourceId:danger.sourceId,quote:danger.content}]}]:[]};
   };
   const workId = text(record(artifact).id);
   await studentA.call('/api/student/artifacts','PUT',{id:workId,type:'document',title:'My strategy',data:{text:'Evidence complete: seven equal groups of eight contain fifty-six counters; checked using repeated addition.'}});
@@ -578,13 +683,85 @@ try {
   const acknowledged = listAlerts(stateDb,savedRunId);
   assert.equal(acknowledged.length,1);assert(acknowledged[0]!.acknowledgedAt,'Same evidence does not reopen acknowledged alert');
   assert.equal(assessmentCalls>0,true);
+  // Synthetic semantic labels; real automatic storage, grouping, feed, privacy and transitions.
+  assessmentReply = payload => {
+    const latest = array(payload.transcript).map(record).filter(item=>item.role==='student').at(-1);
+    const content = latest ? text(latest.content) : '', blocked = content.startsWith("I can't"), finished = content.startsWith('Checked by addition:');
+    const evidence = latest ? [{sourceId:latest.sourceId,quote:content}] : [];
+    return {
+      criteria:array(payload.canonicalCriteria).map((item,index)=>({id:record(item).id,status:latest&&!blocked&&(index===0||finished)?'complete':'not-started',evidence:latest&&!blocked&&(index===0||finished)?evidence:[]})),
+      interaction:latest?{status:blocked?'discouraged':finished?'deepening':'on-track',summary:blocked?'The learner is discouraged about the task and needs a teacher check-in.':'The learner explains their equal-group reasoning.',evidence}:null,
+      alerts:[],
+    };
+  };
+  const monitoringRun = record((await teacher.call(`/api/spaces/${savedSpaceId}/launch`,'POST',{title:'Live monitoring fixture',maxTurns:6})).run);
+  const monitoringId = text(monitoringRun.id), monitoringCode = text(monitoringRun.code);
+  const blockedLearner = new Client(), progressingLearner = new Client(), newLearner = new Client();
+  const monitoringClients = [[blockedLearner,'Synthetic discouraged learner'],[progressingLearner,'Synthetic reasoning learner'],[newLearner,'Synthetic new learner']] as const;
+  const monitoringStudents: Record<string, unknown>[] = [];
+  // Distinct classroom peers keep this new scenario independent of earlier join-rate tests.
+  for (const [index,[client,name]] of monitoringClients.entries()) {
+    const response = await app.fetch(new Request(baseUrl+'/api/join',{method:'POST',headers:{origin:baseUrl,'content-type':'application/json'},body:JSON.stringify({code:monitoringCode,name})}),{requestIP:()=>({address:`203.0.113.${10+index}`})});
+    assert.equal(response.status,200);
+    client.cookie = response.headers.getSetCookie().map(value=>value.split(';')[0]).join('; ');
+    monitoringStudents.push(record(record(await response.json()).participant));
+  }
+  const [blockedStudent,progressingStudent,newStudent] = monitoringStudents;
+  const difficulty = "I can't do this task. I'm no good at it.";
+  await blockedLearner.call('/api/student/chat','POST',{message:difficulty,requestId:uid()});
+  await progressingLearner.call('/api/student/chat','POST',{message:'Two groups of three counters make six counters.',requestId:uid()});
+  await assessed(blockedLearner);await assessed(progressingLearner);
+  let liveDashboard = await teacher.call(`/api/runs/${monitoringId}/dashboard`);
+  const liveAlerts = array(liveDashboard.alerts).map(record);
+  assert.equal(liveAlerts.length,1);
+  assert.equal(liveAlerts[0]!.category,'support-needed');
+  assert.equal(liveAlerts[0]!.participantId,blockedStudent.id);
+  assert.equal(liveAlerts[0]!.severity,'attention');
+  const liveGrouping = record(liveDashboard.grouping);
+  for (const dimension of ['activity','interaction']) {
+    const members = array(liveGrouping[dimension]).flatMap(item=>array(record(item).participantIds)).sort();
+    assert.deepEqual(members,[blockedStudent.id,progressingStudent.id,newStudent.id].sort(),'Every learner appears exactly once in each live grouping dimension');
+  }
+  assert.deepEqual(array(record(array(liveGrouping.activity).map(record).find(item=>item.key==='agenda:1:not-started')).participantIds),[progressingStudent.id],'Completing the first criterion moves a learner to the next agenda step');
+  assert.deepEqual(array(record(array(liveGrouping.interaction).map(record).find(item=>item.key==='discouraged')).participantIds),[blockedStudent.id]);
+  assert.deepEqual(array(record(array(liveGrouping.interaction).map(record).find(item=>item.key==='not-assessed')).participantIds),[newStudent.id],'Joining without work is not evidence of disengagement or mastery');
+  const liveFeed = array(liveDashboard.activityFeed).map(record);
+  assert(liveFeed.some(item=>item.kind==='message'&&item.participantId===blockedStudent.id&&item.summary===difficulty),'The class-wide feed contains the support learner, without selecting their transcript');
+  assert(liveFeed.some(item=>item.kind==='message'&&item.participantId===progressingStudent.id),'The feed includes other students at the same time');
+  assert(liveFeed.some(item=>item.kind==='alert'&&item.participantId===blockedStudent.id&&item.sourceId===record(array(liveAlerts[0]!.evidence)[0]).sourceId),'The support alert links to its exact persisted source');
+  const callsBeforeRepeatedDashboard = assessmentCalls;
+  await teacher.call(`/api/runs/${monitoringId}/dashboard`);
+  assert.equal(assessmentCalls,callsBeforeRepeatedDashboard,'Dashboard polling must not repeat AI assessment of unchanged work');
+  const studentMonitoring = record((await blockedLearner.call('/api/student')).participant);
+  assert(!Object.hasOwn(studentMonitoring,'interaction'),'Interaction judgments remain teacher-only');
+  await blockedLearner.denied(`/api/runs/${monitoringId}/dashboard`);
+  await otherTeacher.denied(`/api/runs/${monitoringId}/dashboard`);
+  await stranger.denied(`/api/runs/${monitoringId}/dashboard`);
+  await teacher.call(`/api/runs/${monitoringId}/alerts/${text(liveAlerts[0]!.id)}/acknowledge`,'POST',{});
+  await blockedLearner.call('/api/student/artifacts','PUT',{type:'document',title:'Draft after support',data:{text:'I am making an attempt.'}});
+  await assessed(blockedLearner);
+  assert.equal(listAlerts(stateDb,monitoringId).length,1,'Unchanged support evidence is deduplicated after new work');
+  assert(listAlerts(stateDb,monitoringId)[0]!.acknowledgedAt,'A reviewed support signal is not reopened for the same evidence');
+  const acknowledgedSupportAt = listAlerts(stateDb,monitoringId)[0]!.acknowledgedAt;
+  await progressingLearner.call('/api/student/chat','POST',{message:'Checked by addition: three plus three is six, so both groups contain six counters in total.',requestId:uid()});
+  await assessed(progressingLearner);
+  liveDashboard = await teacher.call(`/api/runs/${monitoringId}/dashboard`);
+  const advancedGrouping = record(liveDashboard.grouping);
+  assert.deepEqual(array(record(array(advancedGrouping.activity).map(record).find(item=>item.key==='completed')).participantIds),[progressingStudent.id],'New evidence moves the learner from the next step to completed');
+  assert.deepEqual(array(record(array(advancedGrouping.interaction).map(record).find(item=>item.key==='deepening')).participantIds),[progressingStudent.id],'Interaction quality updates independently of activity progress');
+  console.log('PASS support-needed alerts, automatic activity/interaction groups, class-wide feed, grounding, privacy and refresh caching');
   stateDb.close();
   console.log('PASS task-grounded progress, exact student/work evidence, private persistent safeguarding and acknowledgement');
   const beforeRestart = record((await studentA.call('/api/student')).participant);
   await server.stop(true); app.close();
   app = await createApp({dataDir:directory,baseUrl,geminiOAuth:googleSettings});
-  server = Bun.serve({hostname:'127.0.0.1',port:9272,idleTimeout:SERVER_IDLE_SECONDS,maxRequestBodySize:MAX_JSON_BODY,fetch:app.fetch});
+  server = Bun.serve({hostname:'127.0.0.1',port,idleTimeout:SERVER_IDLE_SECONDS,maxRequestBodySize:MAX_JSON_BODY,fetch:app.fetch});
   assert.equal(record((await teacher.call(`/api/spaces/${savedSpaceId}`)).space).title,'Multiplication workshop');
+  assert.equal(text(record((await newcomer.call('/api/status')).teacher).email),signupEmail.toLowerCase(),'A signup session and its account survive a restart');
+  await newcomer.call('/api/logout','POST',{});
+  assert.equal((await newcomer.call('/api/status')).teacher,null,'Logout ends the signup session');
+  await newcomer.call('/api/login','POST',{email:signupEmail.toLowerCase(),password});
+  assert.equal(text(record((await newcomer.call('/api/status')).teacher).email),signupEmail.toLowerCase(),'The signup account signs in again with its own password');
   assert.equal(record((await teacher.call(`/api/spaces/${savedSpaceId}`)).space).allowLanguageChoice,false);
   assert.equal(record(record((await languageStudent.call('/api/student')).run).space).allowLanguageChoice,true,'Teacher opt-in survives server restart');
   const afterRestart = record((await studentA.call('/api/student')).participant);
@@ -592,6 +769,10 @@ try {
   assert.deepEqual(afterRestart.messages,beforeRestart.messages,'Conversation survives restart');
   assert.equal(afterRestart.progress,100,'Assessed task completion survives restart');
   assert.equal(record(array((await teacher.call(`/api/runs/${savedRunId}/alerts`)).alerts)[0]).acknowledgedAt,acknowledged[0]!.acknowledgedAt,'Acknowledgement survives restart');
+  const restoredMonitoring = await teacher.call(`/api/runs/${monitoringId}/dashboard`);
+  const restoredReasoning = record(array(restoredMonitoring.participants).map(record).find(item=>item.id===progressingStudent.id));
+  assert.equal(record(restoredReasoning.interaction).status,'deepening','Current interaction evidence survives restart');
+  assert.equal(record(array(restoredMonitoring.alerts)[0]).acknowledgedAt,acknowledgedSupportAt,'Reviewed support alerts survive restart');
   const restoredOpening = array(record((await studentC.call('/api/student')).participant).messages).map(record).find(item=>item.id===startMessageId);
   assert.equal(restoredOpening?.feedback,'negative','Learner feedback on an assistant reply survives a restart');
   assert.equal(array(record((await studentC.call('/api/student')).participant).messages).length,4,'The stored opening is not duplicated on restart');

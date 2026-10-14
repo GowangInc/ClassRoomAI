@@ -1,4 +1,4 @@
-import {mountTools, renderArtifact, youtubeId} from './tools.js';
+import {mountTools, renderArtifact, youtubeId, uid} from './tools.js';
 import {mountAlertPanel} from './alerts.js';
 
 const main = document.querySelector('#main');
@@ -15,7 +15,7 @@ const LANGUAGE_OPTIONS = [
   ['tl','Tagalog'],['ta','Tamil'],['th','Thai'],['tr','Turkish'],['uk','Ukrainian'],['ur','Urdu'],['vi','Vietnamese'],['cy','Welsh']
 ].map(([value,label])=>({value,label}));
 const ACCEPT = '.txt,.md,.csv,.pdf,.docx,.png,.jpg,.jpeg,.gif';
-const state = {teacher:null,student:null,setupRequired:false};
+const state = {teacher:null,student:null,setupRequired:false,teacherSignupAllowed:false};
 const interventionDrafts = new Map();
 let cleanup = () => {}, revision = 0;
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -124,6 +124,7 @@ function openModal(title,build,className='') {
 }
 function updateNavigation(route) {
   navigation.replaceChildren();const items=state.teacher?[['My Spaces','/teacher/library','library'],['Student insights','/teacher/runs','sessions'],['Create a Space','/teacher/new','spark'],['Providers','/teacher/settings','settings'],['Profile','/teacher/profile','profile'],['Join as student','/join','join']]:[['Join a Space','/join','join'],['Teacher sign in','/login','profile']];
+  if(!state.teacher&&state.teacherSignupAllowed)items.push(['Create teacher account','/signup','profile']);
   for(const [label,href,image]of items){const item=link('',`#${href}`);item.append(icon(image),el('span',label));if(route===href||(href==='/teacher/library'&&route.startsWith('/teacher/edit')))item.setAttribute('aria-current','page');navigation.append(item);}
   if(state.student&&!state.teacher)navigation.append(link('My classroom','#/student'));
   if(state.teacher)navigation.append(button('Sign out',async()=>{await api('/api/logout',{});state.teacher=null;notify('Signed out.');navigate('/login');},'quiet small'));
@@ -142,15 +143,24 @@ function uploadControl(label,onMaterial){const control=field(label,'','file');co
 function landing(){
   heading('Teacher-guided AI','A Space for every learning journey.','Create focused learning experiences, invite students with a code, and follow their progress.');
   const grid=el('div',undefined,{class:'grid welcome-grid'});
-  for(const [title,description,href,label]of [['For teachers','Set the instructions, choose your model and create a Space for close reading, discussion or your own classroom goals.',state.teacher?'#/teacher/library':'#/login',state.teacher?'Open My Spaces':'Teacher sign in'],['For students','Join the Space your teacher shared. Your conversation and saved work remain separate from other learners.','#/join','Join a Space']]){const card=el('section',undefined,{class:'panel stack'});card.append(el('h2',title),el('p',description,{class:'muted'}),link(label,href,'button primary'));grid.append(card);}
+  for(const [title,description,href,label]of [['For teachers','Set the instructions, choose your model and create a Space for close reading, discussion or your own classroom goals.',state.teacher?'#/teacher/library':'#/login',state.teacher?'Open My Spaces':'Teacher sign in'],['For students','Join the Space your teacher shared. Your conversation and saved work remain separate from other learners.','#/join','Join a Space']]){const card=el('section',undefined,{class:'panel stack'});card.append(el('h2',title),el('p',description,{class:'muted'}),link(label,href,'button primary'));if(title==='For teachers'&&!state.teacher&&state.teacherSignupAllowed)card.append(link('Create teacher account','#/signup','button'));grid.append(card);}
   main.append(grid,el('p','Independent self-hosted software. Your teacher selects the AI provider. Review school and provider policies before sharing student data.',{class:'hint'}));
 }
-function authPage(setup = false){
-  heading(setup?'First run · Local administrator':'Teacher access',setup?'Open your workspace.':'Welcome back.',setup?'Create the first teacher account from this computer. Additional accounts can be added by an administrator.':'Student access uses a classroom code, not a teacher account.');
-  const form=el('form',undefined,{class:'panel stack auth-card'});let name;if(setup){name=required(field('Your name'));name.input.autocomplete='name';form.append(name.wrapper);}
-  const email=required(field('Email address','','email')),password=required(field('Password','','password'));email.input.autocomplete='username';password.input.autocomplete=setup?'new-password':'current-password';if(setup)password.input.minLength=4;form.append(email.wrapper,password.wrapper);
-  if(setup)form.append(el('p','Before using AI with students, review your school’s policies and chosen provider’s terms. Prompts, uploaded materials and student conversations may be processed by that provider. No external LMS or certification is implied. Keep the private master encryption key when migrating a database.',{class:'notice warning'}));
-  submit(form,setup?'Create administrator account':'Sign in',async()=>{const result=await api(setup?'/api/setup':'/api/login',{...(setup?{name:name.input.value}:{}),email:email.input.value,password:password.input.value});password.input.value='';state.teacher=result.teacher;state.setupRequired=false;notify('Your teacher workspace is ready.');navigate('/teacher/library');});main.append(form);
+function authPage(mode = 'login'){
+  const setup=mode==='setup',signup=mode==='signup',creating=setup||signup;
+  if(signup&&state.teacher){navigate('/teacher/library');return;}
+  if(creating&&!state.teacherSignupAllowed){
+    const localUrl=new URL(location.href);localUrl.hostname='127.0.0.1';localUrl.search='';localUrl.hash='/signup';
+    heading('Local teacher accounts','Create your account on the host computer.','Teacher signup is only available directly on the computer running this installation.');
+    main.append(el('p',`On that computer, open ${localUrl.href}. Accounts and classroom data belong to that installation.`,{class:'notice'}),link('Teacher sign in','#/login','button'),link('Join as a student','#/join','button'));return;
+  }
+  heading(setup?'First run · Your installation':'Teacher access',creating?'Create your teacher account.':'Welcome back.',setup?'Your first teacher account administers this installation and can configure AI providers.':signup?'Create an ordinary teacher account on this computer. An administrator manages installation settings.':'Student access uses a classroom code, not a teacher account.');
+  const form=el('form',undefined,{class:'panel stack auth-card'});let name;if(creating){name=required(field('Your name'));name.input.autocomplete='name';name.input.maxLength=100;form.append(name.wrapper);}
+  const email=required(field('Email address','','email')),password=required(field('Password','','password'));email.input.autocomplete='username';email.input.maxLength=200;password.input.autocomplete=creating?'new-password':'current-password';if(creating){password.input.minLength=4;password.input.maxLength=200;}form.append(email.wrapper,password.wrapper);
+  if(creating)form.append(el('p','Your account and classroom data are stored on this computer, not in a shared online service. Your email is a sign-in identifier; no verification email is sent.',{class:'hint'}),el('p','Before using AI with students, review your school’s policies and chosen provider’s terms. Prompts, uploaded materials and student conversations may be processed by that provider. No external LMS or certification is implied. Keep the private master encryption key when migrating a database.',{class:'notice warning'}));
+  submit(form,creating?'Create teacher account':'Sign in',async()=>{const result=await api(setup?'/api/setup':signup?'/api/signup':'/api/login',{...(creating?{name:name.input.value}:{}),email:email.input.value,password:password.input.value});password.input.value='';state.teacher=result.teacher;state.setupRequired=false;notify('Your teacher workspace is ready.');navigate('/teacher/library');});
+  if(signup)form.append(link('Already have an account? Sign in','#/login'));else if(!creating&&state.teacherSignupAllowed)form.append(link('Create teacher account','#/signup'));
+  main.append(form);
 }
 async function libraryPage(token){
   const result=await api('/api/spaces');if(token!==revision)return;const spaces=array(result.spaces);heading('Spaces','My Spaces','Create, preview and launch teacher-guided learning experiences.',append(el('div',undefined,{class:'actions'}),link('Create a Space','#/teacher/new','button primary')));
@@ -203,7 +213,9 @@ async function spaceEditor(id,token){
   const teaching=el('section',undefined,{class:'panel stack'});teaching.append(el('h2','The learning design'));
   const instructions=required(field('Instructions for the AI',space.instructions,'textarea','Describe goals, boundaries, teaching language, tone, scaffolding, and use of materials. For example, MYP / DP English A: guide literary or textual analysis of authorial choices, ask for evidence, and develop comparisons without writing the student’s response.'));instructions.input.rows=10;
   const outcomes=field('Learning outcomes (one per line, maximum 6)',array(space.outcomes).join('\n'),'textarea','For example, explain how an authorial choice shapes meaning, support an interpretation with textual evidence, or compare how two texts develop an idea. Adapt these to your subject.');
-  const provider=required(selectField('Model provider',[{value:'',label:'Choose a configured provider'},...array(providerResult.providers).map(item=>({value:item.id,label:`${item.name} · ${item.model}`}))],space.providerId));
+  const configuredProviders=array(providerResult.providers),deepseekPreset=array(providerResult.presets).find(item=>item.id==='deepseek'),limits=record(providerResult.limits);
+  const defaultProvider=configuredProviders.find(item=>item.kind===deepseekPreset?.kind&&item.baseUrl.replace(/\/+$/,'')===deepseekPreset?.baseUrl)|| (configuredProviders.length===1?configuredProviders[0]:null);
+  const provider=required(selectField('Model provider',[{value:'',label:'Choose a configured provider'},...configuredProviders.map(item=>({value:item.id,label:`${item.name} · ${item.model}`}))],space.providerId||defaultProvider?.id||''));
   const audienceDetails=field('Audience context',space.audienceDetails,'textarea','Describe learners, prior knowledge, scaffolding, accessibility supports, or the intended staff audience. For MYP / DP English A, this might include support for close reading and building evidence-based interpretations.');
   const interactionStyle=field('Interaction style / persona',space.interactionStyle,'textarea','Describe how the companion should interact: for example Socratic questioning, concise coaching, or encouraging reflection.');
   const audienceStyle=el('div',undefined,{class:'grid two'});audienceStyle.append(audienceDetails.wrapper,interactionStyle.wrapper);
@@ -306,7 +318,20 @@ async function spaceEditor(id,token){
     const result=await api(id?`/api/spaces/${pathId(id)}`:'/api/spaces',payload,id?'PATCH':'POST');space=result.space;notify('Space saved.');navigate(`/teacher/edit/${space.id}`);
   },saveButton);});
   if(id)actions.append(button('Launch saved space',()=>launch(space),'primary'),button('Export saved template',async()=>download('space.json',await api(`/api/spaces/${pathId(id)}/export`))));actions.append(link('Back to My Spaces','#/teacher/library','button small'));
-  const modelBar=el('section',undefined,{class:'panel editor-model-bar'});modelBar.append(provider.wrapper,link('Configure providers','#/teacher/settings'));
+  const modelBar=el('section',undefined,{class:'panel editor-model-bar'}),budgetStatus=el('p',undefined,{class:'hint',role:'status'}),configureLink=el('a','Configure providers (new tab)',{href:'#/teacher/settings',target:'_blank',rel:'noopener'});
+  function updateBudgetStatus(){const selected=configuredProviders.find(item=>item.id===provider.input.value);budgetStatus.textContent=selected?`${selected.maxOutputTokens.toLocaleString()} output tokens · ${selected.contextChars.toLocaleString()} context characters. Limits apply to all Spaces using this connection.`:'Choose a configured provider before generating a design.';}
+  provider.input.addEventListener('change',updateBudgetStatus);updateBudgetStatus();
+  const budgetButton=button('Token limits',()=>{
+    const selected=configuredProviders.find(item=>item.id===provider.input.value);if(!selected)throw new Error('Choose a configured provider first.');
+    openModal(`${selected.name} token limits`,body=>{
+      const budgetForm=el('form',undefined,{class:'stack'}),output=required(field('Maximum output tokens',selected.maxOutputTokens,'number')),contextBudget=required(field('Maximum context characters',selected.contextChars,'number')),status=el('p',undefined,{role:'status',class:'model-status'});
+      output.input.min=1;output.input.max=limits.maxOutputTokens;output.input.step=1;contextBudget.input.min=limits.minContextChars;contextBudget.input.max=limits.maxContextChars;contextBudget.input.step=1;
+      budgetForm.append(output.wrapper,contextBudget.wrapper,el('p','These connection-wide budgets affect design generation and student conversations. Saving them does not save or discard your Space draft.',{class:'hint'}),status);
+      submit(budgetForm,'Save token limits',async()=>{status.textContent='Saving token limits…';try{const result=await api('/api/providers',{id:selected.id,maxOutputTokens:Number(output.input.value),contextChars:Number(contextBudget.input.value)},'PUT');if(token!==revision)return;Object.assign(selected,result.provider);updateBudgetStatus();modal.close();notify('Token limits saved. Your Space draft is unchanged.');}catch(error){status.className='model-status error';status.textContent=error instanceof Error?error.message:String(error);}});
+      body.append(budgetForm);
+    });
+  },'small');
+  budgetButton.hidden=!state.teacher.admin;modelBar.append(provider.wrapper,budgetStatus,budgetButton,configureLink);
   const outcomePanel=append(el('section',undefined,{class:'panel stack'}),el('h2','Learning outcomes'),outcomes.wrapper);
   const audiencePanel=append(el('section',undefined,{class:'panel stack'}),el('h2','Audience & interaction'),audienceStyle,languageChoiceLabel,languageChoiceHint);
   const publishingPanel=append(el('section',undefined,{class:'panel stack'}),el('h2','Descriptions & sharing'),teacherDescription.wrapper,studentDescription.wrapper,classification,el('p','Sharing a template makes it visible only to authenticated teachers on this installation. Student conversations are never included.',{class:'hint'}));
@@ -340,13 +365,21 @@ function launch(space){
       const sessionOutcomes=lines(outcomes.input.value);if(sessionOutcomes.length>6||sessionOutcomes.some(value=>value.length>300))throw new Error('Use at most six outcomes for this session, each at most 300 characters.');
       const expiresAt=expiry.input.value?new Date(expiry.input.value).toISOString():null;
       const result=await api(`/api/spaces/${pathId(space.id)}/launch`,{title:title.input.value,sessionPrompt:prompt.input.value,outcomes:sessionOutcomes,expiresAt,maxTurns:Number(maxTurns.input.value)});
-      modal.close();navigate(`/teacher/run/${result.run.id}`);shareRun(result.run);
+      modal.close();navigate(`/teacher/run/${result.run.id}`);await shareRun(result.run);
     });
   });
 }
-function shareRun(run){openModal('Invite your learners',body=>{const url=new URL('/',location.origin);url.searchParams.set('code',run.code);body.append(el('p',run.title),el('p',run.code,{class:'join-code'}),el('p','Students enter this code and their name. The code does not grant teacher or transcript access.',{class:'muted'}));const share=field('Student join link',url.href);share.input.readOnly=true;body.append(share.wrapper,el('img',undefined,{src:`/api/runs/${pathId(run.id)}/qr.svg`,alt:'QR code for this student join link',class:'qr'}),button('Copy link',async()=>{if(!navigator.clipboard)throw new Error('Clipboard access is unavailable. Select and copy the link above.');await navigator.clipboard.writeText(url.href);notify('Join link copied.');}),badge(run.status));});}
+async function shareRun(run){
+  const invitation=await api(`/api/runs/${pathId(run.id)}`),url=new URL(invitation.joinUrl);
+  openModal('Invite your learners',body=>{
+    body.append(el('p',run.title),el('p',run.code,{class:'join-code'}),el('p','Students enter this code and their name. The code does not grant teacher or transcript access.',{class:'muted'}));
+    const share=field('Student join link',url.href);share.input.readOnly=true;
+    body.append(share.wrapper,el('img',undefined,{src:`/api/runs/${pathId(run.id)}/qr.svg`,alt:'QR code for this student join link',class:'qr'}),button('Copy link',async()=>{if(!navigator.clipboard)throw new Error('Clipboard access is unavailable. Select and copy the link above.');await navigator.clipboard.writeText(url.href);notify('Join link copied.');}),badge(run.status));
+    if(['127.0.0.1','localhost','[::1]'].includes(url.hostname))body.append(el('p','This server is configured for localhost. Students on other devices need a LAN address: restart with HOST=0.0.0.0 and BASE_URL set to this computer’s LAN URL.',{class:'notice warning'}));
+  });
+}
 async function settingsPage(token){
-  const result=await api('/api/providers');if(token!==revision)return;let providers=array(result.providers);const presets=array(result.presets),oauthProviders=array(result.oauthProviders),admin=state.teacher.admin;
+  const result=await api('/api/providers');if(token!==revision)return;let providers=array(result.providers);const presets=array(result.presets),limits=record(result.limits),oauthProviders=array(result.oauthProviders),admin=state.teacher.admin;
   heading('Configuration','Providers & models','Choose a provider preset, connect it, then pick the model your Spaces will use.');
   const split=el('div',undefined,{class:'split provider-layout'}),list=el('section',undefined,{class:'stack'}),editor=el('section',undefined,{class:'panel stack'});split.append(list);if(admin)split.append(editor);main.append(split);
   let keychain={supported:false,entries:[]},keychainError='';
@@ -372,11 +405,12 @@ async function settingsPage(token){
   }
   function renderEditor(provider={}){
     editor.replaceChildren(el('h2',provider.id?'Edit connection':'Add a connection'));
-    const form=el('form',undefined,{class:'stack'}),preset=selectField('Provider preset',[{value:'',label:'Choose a provider'},...presets.map(item=>({value:item.id,label:item.id==='custom'?'Custom endpoint…':item.name}))],provider.id?(presets.some(item=>item.baseUrl===provider.baseUrl)?presets.find(item=>item.baseUrl===provider.baseUrl).id:'custom'):''),name=required(field('Display name',provider.name)),kind=selectField('API format',['openai','anthropic','gemini'],provider.kind||'openai'),url=required(field('Base URL',provider.baseUrl,'url','HTTPS for remote providers; HTTP only for approved local/private endpoints.')),model=required(field('Chat model identifier',provider.model)),key=field('API key','','password'),source=selectField('Credential source',[{value:'manual',label:'API key (enter or keep the saved one)'},{value:'keychain',label:'Existing macOS Keychain key'},{value:'oauth',label:'Sign in to provider (OAuth)'}],provider.oauthProvider?'oauth':provider.keychainId?'keychain':'manual'),entry=selectField('Existing Keychain entry',[{value:'',label:'Choose a provider key'},...array(keychain.entries).map(item=>({value:item.id,label:`${item.name} — ${item.id}${item.available?'':' (not found)'}`}))],provider.keychainId||''),image=field('Image model (optional)',provider.imageModel),tokens=field('Maximum output tokens',provider.maxOutputTokens??2048,'number'),context=field('Maximum context characters',provider.contextChars??60000,'number');
+    const initialPreset=provider.id?(presets.find(item=>item.baseUrl===provider.baseUrl)||{id:'custom'}):presets.find(item=>item.id==='deepseek');
+    const form=el('form',undefined,{class:'stack'}),preset=selectField('Provider preset',presets.map(item=>({value:item.id,label:item.id==='custom'?'Custom endpoint…':item.name})),initialPreset?.id||'custom'),name=required(field('Display name',provider.name??initialPreset?.name)),kind=selectField('API format',['openai','anthropic','gemini'],provider.kind||initialPreset?.kind||'openai'),url=required(field('Base URL',provider.baseUrl??initialPreset?.baseUrl,'url','HTTPS for remote providers; HTTP only for approved local/private endpoints.')),model=required(field('Chat model identifier',provider.model??initialPreset?.model)),key=field('API key','','password'),source=selectField('Credential source',[{value:'manual',label:'API key (enter or keep the saved one)'},{value:'keychain',label:'Existing macOS Keychain key'},{value:'oauth',label:'Sign in to provider (OAuth)'}],provider.oauthProvider?'oauth':provider.keychainId?'keychain':'manual'),entry=selectField('Existing Keychain entry',[{value:'',label:'Choose a provider key'},...array(keychain.entries).map(item=>({value:item.id,label:`${item.name} — ${item.id}${item.available?'':' (not found)'}`}))],provider.keychainId||''),image=field('Image model (optional)',provider.imageModel),tokens=required(field('Maximum output tokens',provider.maxOutputTokens??initialPreset?.maxOutputTokens??limits.defaultMaxOutputTokens,'number')),context=required(field('Maximum context characters',provider.contextChars??initialPreset?.contextChars??limits.defaultContextChars,'number'));
     const oauthSupported=oauthProviders.length>0,oauthConfigured=oauthProviders.filter(item=>item.configured),defaultOauth=provider.oauthProvider||(oauthConfigured.length===1?oauthConfigured[0].id:'');
     const oauthPick=selectField('Provider sign-in',[{value:'',label:'Choose a provider sign-in'},...oauthProviders.map(item=>({value:item.id,label:item.configured?item.name:`${item.name} — ${item.reason||'Not configured'}`}))],defaultOauth);
     oauthProviders.forEach((item,index)=>{const option=oauthPick.input.options[index+1];if(option&&!item.configured)option.disabled=true;});
-    key.input.autocomplete='new-password';key.input.spellcheck=false;tokens.input.min=1;tokens.input.max=128000;context.input.min=1000;context.input.max=2000000;
+    key.input.autocomplete='new-password';key.input.spellcheck=false;tokens.input.min=1;tokens.input.max=limits.maxOutputTokens;tokens.input.step=1;context.input.min=limits.minContextChars;context.input.max=limits.maxContextChars;context.input.step=1;
     const credentialHint=el('p',undefined,{class:'hint'});
     const oauthStatus=el('p','Sign-in opens the provider’s own website in this tab.',{class:'model-status',role:'status','aria-live':'polite'}),signIn=button(oauthSignInLabel(defaultOauth),startOAuth);
     const oauthBlock=append(el('div',undefined,{class:'stack'}),oauthSupported?oauthPick.wrapper:el('p','This installation does not expose provider sign-in. Enter an API key or use an existing Keychain key instead.',{class:'hint'}),signIn,oauthStatus);
@@ -418,7 +452,7 @@ async function settingsPage(token){
     function oauthSnapshot(item){return {oauthProvider:item.id,...(provider.id?{id:provider.id}:{}),name:name.input.value.trim(),kind:kind.input.value,baseUrl:url.input.value.trim(),model:model.input.value.trim(),...(image.input.value.trim()?{imageModel:image.input.value.trim()}:{}),maxOutputTokens:Number(tokens.input.value),contextChars:Number(context.input.value)};}
     function oauthModelQuery(){const item=oauthProviders.find(value=>value.id===oauthPick.input.value);if(!provider.id||!provider.oauthProvider)throw new Error(`Sign in with ${item?item.name:'the provider'} first: completing sign-in creates and saves this connection, then its models can be fetched.`);return {id:provider.id,name:name.input.value,kind:kind.input.value,baseUrl:url.input.value,credentialSource:'oauth'};}
     for(const control of [kind.input,url.input,key.input])control.addEventListener(control===kind.input?'change':'input',invalidateCatalogue);
-    preset.input.addEventListener('change',()=>{const item=presets.find(value=>value.id===preset.input.value);if(item){name.input.value=item.name;kind.input.value=item.kind;url.input.value=item.baseUrl;model.input.value=item.model;image.input.value=item.imageModel||'';source.input.value='manual';entry.input.value='';}syncPreset();updateSource();});
+    preset.input.addEventListener('change',()=>{const item=presets.find(value=>value.id===preset.input.value);if(item){name.input.value=item.name;kind.input.value=item.kind;url.input.value=item.baseUrl;model.input.value=item.model;image.input.value=item.imageModel||'';tokens.input.value=item.maxOutputTokens??limits.defaultMaxOutputTokens;context.input.value=item.contextChars??limits.defaultContextChars;source.input.value='manual';entry.input.value='';}syncPreset();updateSource();});
     function connection(){if(source.input.value==='keychain'&&!entry.input.value)throw new Error('Choose an existing Keychain entry first.');return {...(provider.id?{id:provider.id}:{}),name:name.input.value,kind:kind.input.value,baseUrl:url.input.value,keychainId:source.input.value==='keychain'?entry.input.value:'',...(source.input.value==='manual'&&key.input.value?{apiKey:key.input.value}:{})};}
     const discover=button('Fetch available models',async()=>{let payload;const version=connectionVersion;modelStatus.className='model-status';modelStatus.textContent='Fetching the provider’s authenticated model catalogue…';try{payload=source.input.value==='oauth'?oauthModelQuery():connection();const response=await api('/api/providers/models',payload);if(token!==revision||version!==connectionVersion)return;const models=array(response.models);if(models.some(item=>!item||typeof item.id!=='string'||typeof item.name!=='string'))throw new Error('The provider returned an invalid model catalogue.');catalogue.input.replaceChildren(el('option','Choose a returned model',{value:''}),...models.map(item=>el('option',item.name===item.id?item.id:`${item.name} · ${item.id}`,{value:item.id})));catalogue.input.value=models.some(item=>item.id===model.input.value)?model.input.value:'';catalogue.wrapper.hidden=!models.length;modelStatus.textContent=models.length?`${models.length} models returned. Choose one below, or keep your manual identifier. Availability does not guarantee that your account can call every model.`:'This provider returned no models. Enter its documented identifier manually.';}catch(error){if(token===revision&&version===connectionVersion){modelStatus.className='model-status error';modelStatus.textContent=`${error instanceof Error?error.message:String(error)} You can still enter a model identifier manually.`;}}finally{if(payload)delete payload.apiKey;}});
     catalogue.input.addEventListener('change',()=>{if(catalogue.input.value)model.input.value=catalogue.input.value;});
@@ -464,32 +498,109 @@ function taskProgress(participant){
   return {state:'not-assessed',assessed:false,text:'Task not yet assessed'};
 }
 function assessedMastery(participant){const values=array(record(participant.insights).outcomes).map(item=>record(item).mastery).filter(value=>typeof value==='number'&&Number.isFinite(value)&&value>=1&&value<=4);return values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null;}
+const INTERACTION_LABELS={'getting-started':'Getting started','on-track':'On track',deepening:'Deepening','needs-guidance':'Needs guidance',struggling:'Struggling',discouraged:'Discouraged',frustrated:'Frustrated','off-task':'Off task'};
+function interactionHeadline(participant){
+  if(participant.progressStatus==='pending')return 'Interaction assessment pending';
+  if(participant.progressStatus==='unavailable')return 'Interaction assessment unavailable';
+  return participant.progressStatus==='current'&&INTERACTION_LABELS[record(participant.interaction).status]||'Interaction not yet assessed';
+}
+function focusEvidence(participant,sourceId){
+  const message=array(participant.messages).find(item=>item.id===sourceId||array(item.attachments).some(attachment=>attachment.id===sourceId)),artifact=array(participant.artifacts).find(item=>item.id===sourceId);
+  const target=document.getElementById(`${message?'message':artifact?'artifact':'source'}-${message?.id||sourceId}`);
+  if(!target)return false;
+  if(target.tagName==='DETAILS')target.open=true;
+  target.tabIndex=-1;target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});return true;
+}
+function evidenceReview(participant,ids){
+  const row=el('div',undefined,{class:'actions source-evidence'});
+  array(ids).forEach(id=>{if(array(participant.messages).some(item=>item.id===id||array(item.attachments).some(attachment=>attachment.id===id))||array(participant.artifacts).some(item=>item.id===id))row.append(button('Review evidence',()=>focusEvidence(participant,id),'small review-source'));});
+  return row;
+}
+function monitoringView(participant){
+  const root=el('div',undefined,{class:'stack interaction-summary'}),current=participant.progressStatus==='current',interaction=current?record(participant.interaction):{};
+  root.append(el('h3',interactionHeadline(participant)),el('p',string(interaction.summary)||'Insufficient current student evidence to describe interaction.'),el('p','AI advisory based on student evidence, not mastery, a grade or a diagnosis.',{class:'hint'}));
+  for(const item of array(interaction.evidence))root.append(el('p',`“${string(record(item).quote)}”`));
+  root.append(evidenceReview(participant,array(interaction.evidence).map(item=>record(item).sourceId)),el('h3','Task steps and outcomes'),el('p',taskProgress(participant).text,{class:'muted'}));
+  const meta=current?record(participant.taskProgressMeta):{},criteria=array(meta.criteria);
+  if(meta.assessedAt)root.append(el('p',`Evidence checked ${new Date(meta.assessedAt).toLocaleString()}`,{class:'hint'}));
+  if(!criteria.length)root.append(el('p',current?'No criterion statuses available.':participant.progressStatus==='pending'?'Criterion assessment pending; earlier judgments are not shown.':participant.progressStatus==='unavailable'?'Criterion assessment unavailable; earlier judgments are not shown.':'Task criteria have not been assessed.',{class:'notice'}));
+  const list=el('ol',undefined,{class:'stack criterion-list'});
+  for(const item of criteria){const criterion=record(item),row=el('li',undefined,{class:'stack','data-status':criterion.status});row.append(el('strong',`${string(criterion.label)} · ${{'not-started':'Not started',partial:'Partially complete',complete:'Complete'}[criterion.status]||'Unknown'}`));for(const quote of array(criterion.evidence))row.append(el('p',`“${string(record(quote).quote)}”`));row.append(evidenceReview(participant,array(criterion.evidence).map(item=>record(item).sourceId)));list.append(row);}
+  if(criteria.length)root.append(list);
+  return root;
+}
 function insightView(insights,participant){
   const root=el('div',undefined,{class:'stack'});
-  function evidence(ids){const row=el('div',undefined,{class:'actions source-evidence'});array(ids).forEach(id=>{const message=array(participant.messages).find(item=>item.id===id),artifact=array(participant.artifacts).find(item=>item.id===id);if(message||artifact)row.append(button('Review evidence',()=>{const target=document.getElementById(`${message?'message':'artifact'}-${id}`);if(target){if(target.tagName==='DETAILS')target.open=true;target.tabIndex=-1;target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});}},'small'));});return row;}
-  const criteria=array(record(participant.taskProgressMeta).criteria);
-  if(criteria.length){const task=el('details');task.append(el('summary',`${taskProgress(participant).text} · completion evidence`));for(const item of criteria){const criterion=record(item),row=el('div',undefined,{class:'stack'});row.append(el('strong',`${string(criterion.label)} · ${string(criterion.status)}`));for(const quote of array(criterion.evidence))row.append(el('p',`“${string(record(quote).quote)}”`));row.append(evidence(array(criterion.evidence).map(item=>record(item).sourceId)));task.append(row);}root.append(task);}
+  const evidence=ids=>evidenceReview(participant,ids);
   if(!insights){root.append(el('p','No mastery assessment generated. Task completion is not a mastery score.',{class:'hint'}));return root;}
   const value=record(insights);root.append(el('h3',string(value.headline)||'AI learning insight'),el('p',string(value.summary)),el('p','AI-generated advisory. Verify evidence yourself; not a grade, diagnosis, or safety guarantee.',{class:'notice warning'}));
   array(value.outcomes).forEach(item=>{const outcome=record(item);const section=el('section',undefined,{class:'panel'});section.append(el('h3',string(outcome.outcome)),el('p',typeof outcome.mastery==='number'?`Assessed mastery ${outcome.mastery} / 4`:'Not enough evidence to assess'),evidence(outcome.evidence));root.append(section);});array(value.flags).forEach(item=>{const flag=record(item),section=el('section',undefined,{class:'notice warning'});section.append(el('strong',`For human review · ${string(flag.severity)}`),el('p',string(flag.reason)),evidence(flag.evidence));root.append(section);});return root;
 }
 async function dashboardPage(id,token){
-  let data=await api(`/api/runs/${pathId(id)}/dashboard`);if(token!==revision)return;let selected='',polling=false;
+  let data=await api(`/api/runs/${pathId(id)}/dashboard`);if(token!==revision)return;let selected='',polling=false,connectionFailed=false;
   heading('Teacher observation',data.run.title,'Listen first. Follow the evidence. Keep learners in view.');
   const lifecycle=el('div',undefined,{class:'panel stack'}),status=el('div',undefined,{class:'row between'}),controls=el('div',undefined,{class:'actions'}),runInfo=el('div'),stats=el('div',undefined,{class:'stats'});lifecycle.append(status,runInfo,controls,stats);main.append(lifecycle);
   const alertHost=el('div');main.append(alertHost);
-  const alertPanel=mountAlertPanel(alertHost,{api,runId:id,onError:showError,onReview:(participantId,sourceId)=>{
-    const participant=array(data.participants).find(item=>item.id===participantId);if(!participant)return;
-    selected=participantId;renderParticipant(participant);renderLearners();
-    const message=document.getElementById(`message-${sourceId}`);if(message){message.tabIndex=-1;message.focus({preventScroll:true});message.scrollIntoView({block:'center'});}else right.scrollIntoView({block:'start'});
-  }});
+  const alertPanel=mountAlertPanel(alertHost,{api,runId:id,onError:showError,onReview:reviewLearner});
   const statusDetails=el('div',undefined,{class:'row'}),shareControl=button('Share code & QR',()=>shareRun(data.run));status.append(statusDetails,shareControl);
   const draftPrefix=`classroom-intervention-${state.teacher.id}-${id}-`,draftKey=participantId=>draftPrefix+participantId;
   function getDraft(participantId){const key=draftKey(participantId);return interventionDrafts.has(key)?interventionDrafts.get(key):preference(key);}
   function setDraft(participantId,value){const key=draftKey(participantId);interventionDrafts.set(key,value);preference(key,value);}
-  const split=el('div',undefined,{class:'split'}),left=el('section',undefined,{class:'stack'}),right=el('section',undefined,{class:'panel stack','aria-label':'Selected learner'});split.append(left,right);main.append(split);const filters=el('div',undefined,{class:'grid two'}),sort=selectField('Sort learners',[{value:'name',label:'Name'},{value:'mastery',label:'Assessed mastery (lowest first)'},{value:'recent',label:'Recently active'}],'name'),group=selectField('Assessment group',[{value:'all',label:'All learners'},{value:'unassessed',label:'Unassessed'},{value:'support',label:'AI suggests support'},{value:'ready',label:'AI suggests ready'}],'all');filters.append(sort.wrapper,group.wrapper);const learners=el('div',undefined,{class:'stack'}),summary=el('section',undefined,{class:'panel stack'});left.append(filters,learners,summary);
-  const refresh=async()=>{data=await api(`/api/runs/${pathId(id)}/dashboard`);if(token===revision)render(false);};
+  const live=el('p',undefined,{class:'notice monitor-live',role:'status'});
+  const feedPanel=el('section',undefined,{class:'panel stack activity-feed-panel','aria-label':'Space activity feed'}),feedCount=el('p',undefined,{class:'hint'}),feed=el('div',undefined,{class:'activity-feed stack',tabindex:'0','aria-label':'Latest Space events'});
+  feedPanel.append(el('h2','Space activity feed'),live,feedCount,feed);main.append(feedPanel);
+  const split=el('div',undefined,{class:'split'}),left=el('section',undefined,{class:'stack'}),right=el('section',undefined,{class:'panel stack','aria-label':'Selected learner'});split.append(left,right);main.append(split);
+  const filters=el('div',undefined,{class:'grid two monitor-filters'}),sort=selectField('Sort learners',[{value:'name',label:'Name'},{value:'mastery',label:'Assessed mastery (lowest first)'},{value:'recent',label:'Recently active'}],'name'),activity=selectField('Activity stage',[{value:'all',label:'All activity stages'}],'all'),interaction=selectField('Interaction',[{value:'all',label:'All interactions'}],'all'),filterCount=el('p',undefined,{class:'hint'});
+  const resetFilters=button('Show all learners',()=>{activity.input.value='all';interaction.input.value='all';renderLearners();},'small');
+  filters.append(activity.wrapper,interaction.wrapper,sort.wrapper,resetFilters);const learners=el('div',undefined,{class:'stack'}),summary=el('section',undefined,{class:'panel stack'});left.append(filters,filterCount,learners,summary);
+  const learnerNodes=new Map(),feedNodes=new Map(),artifactNodes=new Map();
+  function updateLive(){
+    const checked=Date.parse(data.observedAt),stale=connectionFailed||!Number.isFinite(checked)||Date.now()-checked>10000;
+    live.dataset.status=stale?'stale':document.hidden?'paused':'live';
+    live.textContent=`${stale?'Stale — showing the last snapshot':document.hidden?'Updates paused while this tab is hidden':'Live — checked every 3 seconds'} · ${Number.isFinite(checked)?'Checked at '+new Date(checked).toLocaleString():'Checked-at time unavailable'}`;
+  }
+  const refresh=async()=>{try{const next=await api(`/api/runs/${pathId(id)}/dashboard`);if(token!==revision)return;data=next;connectionFailed=false;render(false);}catch(error){if(token===revision){connectionFailed=true;updateLive();}throw error;}};
+  function reviewLearner(participantId,sourceId){
+    const participant=array(data.participants).find(item=>item.id===participantId);
+    if(!participant){notify('This learner is no longer available in the Space.');return;}
+    selected=participantId;renderParticipant(participant);
+    if(!matchingParticipants().some(item=>item.id===participantId)){activity.input.value='all';interaction.input.value='all';}
+    renderLearners();
+    if(sourceId){if(!focusEvidence(participant,sourceId)){notify('The exact source is no longer available. Review the learner’s current work.');right.scrollIntoView({block:'start'});}}
+    else{right.querySelector('h2').tabIndex=-1;right.querySelector('h2').focus({preventScroll:true});right.scrollIntoView({block:'start'});}
+  }
+  function updateGroupFilter(control,groups,label){
+    const options=[{value:'all',label},...array(groups).map(group=>({value:group.key,label:`${group.label} (${array(group.participantIds).length})`}))],signature=JSON.stringify(options);
+    if(control.input.dataset.signature===signature)return;
+    const selectedValue=control.input.value,existing=new Map(Array.from(control.input.options).map(option=>[option.value,option])),keep=new Set();
+    for(const option of options){keep.add(option.value);let node=existing.get(option.value);if(!node){node=el('option',undefined,{value:option.value});control.input.append(node);}node.textContent=option.label;}
+    for(const option of Array.from(control.input.options))if(!keep.has(option.value))option.remove();
+    control.input.value=keep.has(selectedValue)?selectedValue:'all';control.input.dataset.signature=signature;
+  }
+  function matchingParticipants(){
+    let participants=[...array(data.participants)];
+    for(const [dimension,control]of [['activity',activity],['interaction',interaction]])if(control.input.value!=='all'){const group=array(record(data.grouping)[dimension]).find(item=>item.key===control.input.value),ids=new Set(array(record(group).participantIds));participants=participants.filter(item=>ids.has(item.id));}
+    return participants;
+  }
+  function renderFeed(){
+    const events=array(data.activityFeed).slice(0,200),keep=new Set(),anchor=Array.from(feed.children).find(node=>node.getBoundingClientRect().bottom>=feed.getBoundingClientRect().top),offset=anchor?anchor.getBoundingClientRect().top-feed.getBoundingClientRect().top:0,atTop=feed.scrollTop<2,focused=feed.contains(document.activeElement);
+    feedCount.textContent=`Latest 200 Space events · ${events.length} shown · newest first · all learners, independent of filters`;
+    for(const [index,event]of events.entries()){
+      keep.add(event.id);let entry=feedNodes.get(event.id);
+      if(!entry){const card=el('article',undefined,{class:'feed-event stack'}),title=el('strong'),meta=el('p',undefined,{class:'feed-meta hint'}),excerpt=el('p'),review=button('Review learner',()=>reviewLearner(entry.value.participantId,entry.value.sourceId),'small review-source');card.append(title,meta,excerpt,review);entry={card,title,meta,excerpt,review};feedNodes.set(event.id,entry);}
+      entry.value=event;entry.card.dataset.kind=event.kind;entry.card.dataset.severity=event.severity||'';entry.title.textContent=`${event.studentName} · ${event.label}`;entry.meta.textContent=`${new Date(event.createdAt).toLocaleString()} · ${['assessment','alert'].includes(event.kind)?'AI advisory':'Recorded activity'}${event.severity==='urgent'?' · Urgent':event.severity==='attention'?' · Attention':''}`;entry.excerpt.textContent=event.summary;entry.review.textContent=event.sourceId?'Review learner & evidence':'Review learner';
+      if(entry.card.parentNode!==feed)feed.insertBefore(entry.card,feed.children[index]||null);
+      else if(!focused&&feed.children[index]!==entry.card)feed.insertBefore(entry.card,feed.children[index]||null);
+    }
+    for(const [eventId,entry]of feedNodes)if(!keep.has(eventId)&&!entry.card.contains(document.activeElement)){entry.card.remove();feedNodes.delete(eventId);}
+    feed.querySelector('.empty')?.remove();if(!events.length)feed.append(empty('No Space events yet. Events will appear as learners join and work.'));
+    if(feedNodes.size>events.length)feedCount.textContent+=' · older focused event retained until focus leaves';
+    if(!atTop&&anchor?.isConnected)feed.scrollTop+=anchor.getBoundingClientRect().top-feed.getBoundingClientRect().top-offset;
+    else if(atTop&&!focused)feed.scrollTop=0;
+  }
   function render(force){
+    const pageX=window.scrollX,pageY=window.scrollY;updateLive();renderFeed();
+    updateGroupFilter(activity,record(data.grouping).activity,'All activity stages');updateGroupFilter(interaction,record(data.grouping).interaction,'All interactions');
     alertPanel.update(data.alerts,data.monitoring);
     statusDetails.replaceChildren(badge(data.run.status),el('strong',data.run.title));
     runInfo.replaceChildren(el('p',`Code ${data.run.code} · ${data.run.maxTurns} turns maximum${data.run.expiresAt?' · Expires '+new Date(data.run.expiresAt).toLocaleString():''}`,{class:'muted'}));
@@ -507,31 +618,33 @@ async function dashboardPage(id,token){
     const pauseControl=controls.querySelector('[data-lifecycle="pause"]');if(pauseControl)pauseControl.textContent=data.run.status==='ended'?'Classroom ended':data.run.status==='active'?'Pause classroom':'Resume classroom';
     for(const control of controls.querySelectorAll('[data-lifecycle]')){control.dataset.locked=String(data.run.status==='ended');if(data.run.status==='ended')control.disabled=true;}
     stats.replaceChildren();[['Learners',array(data.participants).length],['Individually paused',array(data.participants).filter(item=>item.paused).length],['AI assessed',array(data.participants).filter(item=>assessedMastery(item)!==null).length]].forEach(([label,value])=>stats.append(append(el('div'),el('strong',value),el('span',label))));
-    if(!learners.contains(document.activeElement)||force)renderLearners();renderSummary();
+    renderLearners();renderSummary();
     const participant=array(data.participants).find(item=>item.id===selected);
     if(participant){if(force||right.dataset.participant!==participant.id)renderParticipant(participant);else updateParticipant(participant);}else if(!selected)right.replaceChildren(empty('Select a learner to review their conversation, uploads, work and assessment evidence.'));
+    if(!force)window.scrollTo(pageX,pageY);
   }
+  function learnerAlerts(participantId){return array(data.alerts).filter(alert=>alert.participantId===participantId&&!alert.acknowledgedAt);}
+  function alertText(alerts){const urgent=alerts.filter(alert=>alert.severity==='urgent').length,support=alerts.filter(alert=>alert.category==='support-needed').length;return alerts.length?`${alerts.length} open teacher alert${alerts.length===1?'':'s'}${urgent?' · '+urgent+' urgent':''}${support?' · '+support+' support needed':''}`:'No open teacher alerts';}
   function renderLearners(){
-    learners.replaceChildren();let participants=[...array(data.participants)];const groupIds=array(record(data.summary)[group.input.value]);
-    if(group.input.value==='unassessed')participants=participants.filter(item=>assessedMastery(item)===null);else if(['support','ready'].includes(group.input.value))participants=participants.filter(item=>groupIds.includes(item.id));
+    const participants=matchingParticipants(),keep=new Set(),focused=learners.contains(document.activeElement);
     participants.sort((a,b)=>sort.input.value==='mastery'?(assessedMastery(a)??99)-(assessedMastery(b)??99):sort.input.value==='recent'?Date.parse(b.updatedAt)-Date.parse(a.updatedAt):string(a.name).localeCompare(string(b.name)));
-    if(!participants.length)learners.append(empty('No learners in this group. Share the code, or generate evidence-backed insights.'));
-    participants.forEach(participant=>{
-      const card=el('article',undefined,{class:'panel stack'}),mastery=assessedMastery(participant);
-      const review=button(selected===participant.id?'Reviewing learner':'Review learner',()=>{
-        if(selected===participant.id)return;
-        selected=participant.id;renderParticipant(array(data.participants).find(item=>item.id===selected));
-        for(const control of learners.querySelectorAll('[data-review]')){const current=control.dataset.review===selected;control.textContent=current?'Reviewing learner':'Review learner';control.className=current?'primary':'';}
-      },selected===participant.id?'primary':'');review.dataset.review=participant.id;
-      card.append(append(el('div',undefined,{class:'row between'}),el('h3',participant.name),participant.paused?badge('paused'):null),el('p',`${array(participant.messages).filter(message=>message.role==='user').length} student messages · ${taskProgress(participant).text}`,{class:'muted'}),el('p',mastery===null?'Not assessed':`AI-assessed mastery ${mastery.toFixed(1)} / 4`),review);learners.append(card);
-    });
+    filterCount.textContent=`${participants.length} of ${array(data.participants).length} learners · activity and interaction filters combine`;
+    for(const [index,participant]of participants.entries()){
+      keep.add(participant.id);let entry=learnerNodes.get(participant.id);
+      if(!entry){const card=el('article',undefined,{class:'panel stack learner-card'}),name=el('h3'),status=el('p',undefined,{class:'muted'}),headline=el('strong'),description=el('p'),mastery=el('p',undefined,{class:'hint'}),alerts=el('p',undefined,{class:'learner-alerts'}),review=button('Review learner',()=>reviewLearner(participant.id));review.dataset.review=participant.id;card.append(name,status,headline,description,mastery,alerts,review);entry={card,name,status,headline,description,mastery,alerts,review};learnerNodes.set(participant.id,entry);}
+      const mastery=assessedMastery(participant),alerts=learnerAlerts(participant.id),stage=array(record(data.grouping).activity).find(group=>array(group.participantIds).includes(participant.id));
+      entry.name.textContent=participant.name;entry.status.textContent=`${participant.paused?'Individually paused · ':''}${stage?.label||taskProgress(participant).text}`;entry.headline.textContent=interactionHeadline(participant);entry.description.textContent=participant.progressStatus==='current'?string(record(participant.interaction).summary):'Current interaction evidence is not available.';entry.mastery.textContent=mastery===null?'Mastery not assessed (separate from task progress and interaction)':`Optional AI-assessed mastery ${mastery.toFixed(1)} / 4 · separate from interaction`;entry.alerts.textContent=alertText(alerts);entry.alerts.dataset.severity=alerts.some(alert=>alert.severity==='urgent')?'urgent':alerts.length?'attention':'';entry.review.textContent=selected===participant.id?'Reviewing learner':'Review learner';entry.review.className=selected===participant.id?'primary':'';entry.review.setAttribute('aria-pressed',String(selected===participant.id));entry.card.setAttribute('aria-current',String(selected===participant.id));
+      if(entry.card.parentNode!==learners)learners.insertBefore(entry.card,learners.children[index]||null);else if(!focused&&learners.children[index]!==entry.card)learners.insertBefore(entry.card,learners.children[index]||null);
+    }
+    for(const [participantId,entry]of learnerNodes)if(!keep.has(participantId)){if(entry.card.contains(document.activeElement)){entry.status.textContent='No longer matches both filters — retained until focus leaves';filterCount.textContent+=' · focused learner retained';}else{entry.card.remove();learnerNodes.delete(participantId);}}
+    learners.querySelector('.empty')?.remove();if(!participants.length)learners.append(empty(array(data.participants).length?'No learners match both filters. Choose Show all learners to reset.':'No learners yet. Share the Space code to get started.'));
   }
-  function renderSummary(){summary.replaceChildren(el('h2','The classroom picture'),el('p','AI-generated advisory. Groups are based on assessed mastery, never message count. Verify transcripts and context before acting.',{class:'notice warning'}));if(!data.summary){summary.append(empty('No group synthesis generated yet.'));return;}const value=record(data.summary);summary.append(el('p',string(value.summary)));const misunderstandings=el('ul');array(value.misconceptions).forEach(item=>misunderstandings.append(el('li',string(item))));if(misunderstandings.children.length)summary.append(el('h3','Possible misconceptions'),misunderstandings);for(const key of ['support','ready']){summary.append(el('h3',key==='support'?'Suggested support group':'Suggested ready group'));const names=array(value[key]).map(pid=>array(data.participants).find(item=>item.id===pid)?.name).filter(Boolean);summary.append(el('p',names.join(', ')||'No learners identified.'));}}
+  function renderSummary(){const signature=JSON.stringify([data.summary,array(data.participants).map(item=>[item.id,item.name])]);if(summary.dataset.signature===signature)return;summary.dataset.signature=signature;summary.replaceChildren(el('h2','Optional group learning synthesis'),el('p','Manually generated AI advisory about mastery. Separate from live activity stages and interaction groups. Verify transcripts and context before acting.',{class:'notice warning'}));if(!data.summary){summary.append(empty('No optional group synthesis generated yet. Live monitoring does not require it.'));return;}const value=record(data.summary);summary.append(el('p',string(value.summary)));const misunderstandings=el('ul');array(value.misconceptions).forEach(item=>misunderstandings.append(el('li',string(item))));if(misunderstandings.children.length)summary.append(el('h3','Possible misconceptions'),misunderstandings);for(const key of ['support','ready']){summary.append(el('h3',key==='support'?'Mastery-based suggested support group':'Mastery-based suggested ready group'));const names=array(value[key]).map(pid=>array(data.participants).find(item=>item.id===pid)?.name).filter(Boolean);summary.append(el('p',names.join(', ')||'No learners identified.'));}}
   function renderParticipant(participant){
     if(!participant)return;
     if(right.dataset.participant===participant.id){updateParticipant(participant);return;}
-    right.replaceChildren();right.dataset.participant=participant.id;right.append(el('h2',participant.name));
-    right.append(el('p',undefined,{class:'muted','data-participant-status':''}));
+    artifactNodes.clear();right.replaceChildren();right.dataset.participant=participant.id;right.append(el('h2',participant.name));
+    right.append(el('p',undefined,{class:'muted','data-participant-status':''}),el('p',undefined,{class:'learner-alerts','data-participant-alerts':''}),el('div',undefined,{'data-monitoring':''}));
     const actions=el('div',undefined,{class:'actions'});
     const pause=button(participant.paused?'Resume learner':'Pause learner',async()=>{
       const current=array(data.participants).find(item=>item.id===participant.id);
@@ -550,27 +663,36 @@ async function dashboardPage(id,token){
       if(getDraft(participant.id)===sent){setDraft(participant.id,'');const current=right.dataset.participant===participant.id?right.querySelector('[data-intervention]'):null;if(current?.value===sent)current.value='';}
       await refresh();
     });
-    right.append(form,el('h3','Conversation'),el('div',undefined,{class:'transcript stack','data-transcript':''}),el('h3','Learning insight'),el('div',undefined,{'data-insight':''}),el('h3','Saved work'),el('div',undefined,{class:'artifacts','data-artifacts':''}));
+    right.append(form,el('h3','Conversation'),el('div',undefined,{class:'transcript stack','data-transcript':''}),el('h3','Optional mastery insight'),el('div',undefined,{'data-insight':''}),el('h3','Saved work'),el('div',undefined,{class:'artifacts','data-artifacts':''}));
     updateParticipant(participant);
   }
   function updateParticipant(participant){
     const status=right.querySelector('[data-participant-status]');status.textContent=`${participant.paused?'Individually paused':'Not individually paused'} · ${taskProgress(participant).text}`;
+    const alerts=learnerAlerts(participant.id),indicator=right.querySelector('[data-participant-alerts]');indicator.textContent=alertText(alerts);indicator.dataset.severity=alerts.some(alert=>alert.severity==='urgent')?'urgent':alerts.length?'attention':'';
+    const monitor=right.querySelector('[data-monitoring]'),monitorSignature=JSON.stringify([participant.progressStatus,participant.progress,participant.interaction,participant.taskProgressMeta]);
+    if(monitor.dataset.signature!==monitorSignature&&!monitor.contains(document.activeElement)){monitor.replaceChildren(monitoringView(participant));monitor.dataset.signature=monitorSignature;}
+    let staleDetails=right.querySelector('[data-stale-details]');
+    if(monitor.dataset.signature!==monitorSignature&&monitor.contains(document.activeElement)){if(!staleDetails){staleDetails=el('p',undefined,{class:'notice warning','data-stale-details':''});monitor.before(staleDetails);}staleDetails.textContent=`${taskProgress(participant).text}. Detail snapshot below is stale; it updates when focus leaves the evidence control.`;}else staleDetails?.remove();
     const pause=right.querySelector('[data-pause-learner]');if(pause)pause.textContent=participant.paused?'Resume learner':'Pause learner';
     syncMessages(right.querySelector('[data-transcript]'),participant.messages,false);
-    const insight=right.querySelector('[data-insight]'),signature=JSON.stringify([participant.insights,participant.taskProgressMeta]);
-    if(insight.dataset.signature!==signature&&!insight.contains(document.activeElement)){insight.replaceChildren(insightView(participant.insights,participant));insight.dataset.signature=signature;}
-    const artifacts=right.querySelector('[data-artifacts]'),artifactSignature=JSON.stringify(array(participant.artifacts).map(item=>[item.id,item.updatedAt]));
-    if(artifacts.dataset.signature!==artifactSignature&&!artifacts.contains(document.activeElement)){
-      artifacts.replaceChildren();if(!array(participant.artifacts).length)artifacts.append(empty('No saved work yet.'));
-      array(participant.artifacts).forEach(artifact=>{const details=el('details',undefined,{id:`artifact-${artifact.id}`});details.append(el('summary',`${artifact.title} · ${artifact.type}`));const view=el('div',undefined,{class:'tool-workspace'});renderArtifact(view,artifact);details.append(view);artifacts.append(details);});
-      artifacts.dataset.signature=artifactSignature;
+    for(const message of array(participant.messages)){
+      const node=document.getElementById(`message-${message.id}`);if(!node)continue;
+      const findings=alerts.filter(alert=>array(alert.evidence).some(item=>item.sourceId===message.id||array(message.attachments).some(attachment=>attachment.id===item.sourceId)));let marker=node.querySelector('[data-source-alert]');
+      if(findings.length){if(!marker){marker=el('p',undefined,{class:'learner-alerts','data-source-alert':''});node.prepend(marker);}marker.textContent=alertText(findings);marker.dataset.severity=findings.some(alert=>alert.severity==='urgent')?'urgent':'attention';}else marker?.remove();
     }
+    const insight=right.querySelector('[data-insight]'),signature=JSON.stringify(participant.insights);
+    if(insight.dataset.signature!==signature&&!insight.contains(document.activeElement)){insight.replaceChildren(insightView(participant.insights,participant));insight.dataset.signature=signature;}
+    const artifacts=right.querySelector('[data-artifacts]'),keep=new Set();
+    for(const artifact of array(participant.artifacts)){keep.add(artifact.id);let entry=artifactNodes.get(artifact.id);if(!entry){const details=el('details',undefined,{id:`artifact-${artifact.id}`}),title=el('summary'),view=el('div',undefined,{class:'tool-workspace'});details.append(title,view);entry={details,title,view};artifactNodes.set(artifact.id,entry);artifacts.append(details);}entry.title.textContent=`${artifact.title} · ${artifact.type}`;const signature=JSON.stringify([artifact.updatedAt,artifact.data]);if(entry.signature!==signature&&!entry.details.contains(document.activeElement)){entry.view.replaceChildren();renderArtifact(entry.view,artifact);entry.signature=signature;}}
+    for(const [artifactId,entry]of artifactNodes)if(!keep.has(artifactId)&&!entry.details.contains(document.activeElement)){entry.details.remove();artifactNodes.delete(artifactId);}
+    artifacts.querySelector('.empty')?.remove();if(!array(participant.artifacts).length)artifacts.append(empty('No saved work yet.'));
   }
   function editSession(){openModal('Edit this session',body=>{const form=el('form',undefined,{class:'stack'}),title=required(field('Session title',data.run.title)),prompt=field('Session instructions',data.run.sessionPrompt,'textarea');prompt.input.disabled=data.run.status!=='paused';form.append(title.wrapper,prompt.wrapper,el('p','Pause the classroom before editing session instructions. The reusable template is unchanged.',{class:'notice'}));submit(form,'Save session changes',async()=>{await api(`/api/runs/${pathId(id)}`,{title:title.input.value,...(data.run.status==='paused'?{sessionPrompt:prompt.input.value}:{})},'PATCH');modal.close();await refresh();});body.append(form);});}
   function collaborator(){openModal('Add a teaching collaborator',body=>{const form=el('form',undefined,{class:'stack'}),email=required(field('Existing teacher email','','email'));form.append(email.wrapper,el('p','Adds monitoring, pause/resume and intervention access for an existing teacher account. No email invitation is sent. Only the owner or administrator can grant access.',{class:'notice'}));submit(form,'Grant classroom access',async()=>{await api(`/api/runs/${pathId(id)}/collaborators`,{email:email.input.value});modal.close();notify('Collaborator granted access.');await refresh();});body.append(form);if(array(data.collaborators).length)body.append(el('p',array(data.collaborators).map(item=>typeof item==='string'?item:string(record(item).email)).join(', ')));});}
-  sort.input.addEventListener('change',renderLearners);group.input.addEventListener('change',renderLearners);render(true);
-  const timer=setInterval(async()=>{if(polling||document.hidden)return;polling=true;try{await refresh();}catch(error){if(token===revision)showError(error);}finally{polling=false;}},3000);
-  const beforeUnload=event=>{if(array(data.participants).some(participant=>getDraft(participant.id))){event.preventDefault();event.returnValue='';}};window.addEventListener('beforeunload',beforeUnload);cleanup=()=>{clearInterval(timer);alertPanel.destroy();window.removeEventListener('beforeunload',beforeUnload);};
+  sort.input.addEventListener('change',renderLearners);activity.input.addEventListener('change',renderLearners);interaction.input.addEventListener('change',renderLearners);render(true);
+  const timer=setInterval(async()=>{if(token!==revision||polling)return;updateLive();if(document.hidden)return;polling=true;try{await refresh();}catch(error){if(token===revision)showError(error);}finally{polling=false;}},3000);
+  const visibility=()=>updateLive();document.addEventListener('visibilitychange',visibility);
+  const beforeUnload=event=>{if(array(data.participants).some(participant=>getDraft(participant.id))){event.preventDefault();event.returnValue='';}};window.addEventListener('beforeunload',beforeUnload);cleanup=()=>{clearInterval(timer);alertPanel.destroy();document.removeEventListener('visibilitychange',visibility);window.removeEventListener('beforeunload',beforeUnload);};
 }
 function joinPage(){
   const form=el('form',undefined,{class:'panel stack join-card'}),intro=append(el('div',undefined,{class:'join-heading'}),el('h1','Join a Space'),el('p','Enter the code your teacher shared.')),codeGroup=el('fieldset',undefined,{class:'stack',style:'border:0;padding:0'}),boxes=el('div',undefined,{class:'code-grid'}),initial=(new URL(location.href).searchParams.get('code')||'').toUpperCase().replace(/[^A-Z2-9]/g,'').slice(0,8),inputs=[];
@@ -669,7 +791,7 @@ async function studentPage(token){
   async function startConversation(){if(busy||!active()||array(data.participant.messages).length)return;busy=true;openingRetry.hidden=true;pendingStatus.textContent='Starting your Space with the selected model…';update();try{const result=await api('/api/student/start',{});if(token!==revision)return;data=result;pendingStatus.textContent='';}catch(error){openingRetry.hidden=false;pendingStatus.textContent=`${error instanceof Error?error.message:String(error)} Retry the opening, or send your own message.`;}finally{busy=false;if(token===revision){update();draft.input.focus();}}}
   async function sendMessage(){
     if(busy)return;if(!active())throw new Error('This Space is paused or closed. Keep your draft and ask your teacher.');if(!draft.input.value.trim()&&!attachments.length)throw new Error('Write a message or attach a file first.');
-    if(!pending)pending={message:draft.input.value,attachments:[...attachments],requestId:crypto.randomUUID(),...(language?{language:languageCode()}:{}),difficulty:difficulty.input.value};
+    if(!pending)pending={message:draft.input.value,attachments:[...attachments],requestId:uid(),...(language?{language:languageCode()}:{}),difficulty:difficulty.input.value};
     busy=true;pendingStatus.textContent='The learning companion is thinking…';retry.hidden=true;openingRetry.hidden=true;update();
     try{const result=await api('/api/student/chat',pending);if(token!==revision)return;data.participant.messages=array(result.messages);draft.input.value='';draft.input.style.height='42px';preference(draftKey,'');attachments=[];pending=null;renderAttachments();pendingStatus.textContent='';syncMessages(chat,data.participant.messages,true,languageCode,changeFeedback);feed.scrollTop=feed.scrollHeight;}
     catch(error){retry.hidden=false;pendingStatus.textContent=`${error instanceof Error?error.message:String(error)} Your draft is retained for retry.`;}
@@ -684,8 +806,9 @@ async function routePage(){
   cleanup();cleanup=()=>{};revision++;const token=revision;clearError();main.replaceChildren();const route=location.hash.slice(1)|| (new URL(location.href).searchParams.has('code')?'/join':'/');updateNavigation(route);
   document.body.dataset.surface=route==='/student'&&state.student&&!state.setupRequired?'student':'teacher';
   window.scrollTo({top:0,left:0});
-  if(state.setupRequired){authPage(true);return;}
-  if(route.startsWith('/teacher')&&!state.teacher){authPage(false);return;}
+  if(state.setupRequired){authPage('setup');return;}
+  if(route==='/signup'){authPage('signup');return;}
+  if(route.startsWith('/teacher')&&!state.teacher){authPage();return;}
   if(route==='/student'&&!state.student){joinPage();return;}
   try{if(route==='/')landing();else if(route==='/join')joinPage();else if(route==='/login')authPage();else if(route==='/teacher/library')await libraryPage(token);else if(route==='/teacher/new')await spaceEditor('',token);else if(route.startsWith('/teacher/edit/'))await spaceEditor(decodeURIComponent(route.slice('/teacher/edit/'.length)),token);else if(route==='/teacher/settings')await settingsPage(token);else if(route==='/teacher/profile')await profilePage(token);else if(route==='/teacher/runs')await runsPage(token);else if(route.startsWith('/teacher/run/'))await dashboardPage(decodeURIComponent(route.slice('/teacher/run/'.length)),token);else if(route==='/student')await studentPage(token);else{heading('Page not found','Find your way back.');main.append(link('Go to the entrance','#/','button'));}if(token===revision)main.focus({preventScroll:true});}catch(error){if(token===revision){showError(error);main.append(button('Retry loading this page',routePage,'primary'));}}
 }
@@ -699,5 +822,5 @@ function consumeProviderLoginMarker(){
   try{history.replaceState(history.state,'',`${url.pathname}${url.search}${url.hash}`);}catch{}
   notify(marker==='connected'?'Provider sign-in complete. The connection is saved on this computer; fetch its models, then test it before classroom use.':'Provider sign-in was not completed, so no credential was stored and existing connections are unchanged. You can try again or choose another credential source.');
 }
-async function start(){try{const status=await api('/api/status');state.setupRequired=status.setupRequired===true;state.teacher=status.teacher||null;state.student=status.student||null;await routePage();consumeProviderLoginMarker();}catch(error){showError(error);main.replaceChildren(empty('Your workspace could not be opened.'),button('Try again',start,'primary'));}}
+async function start(){try{const status=await api('/api/status');state.setupRequired=status.setupRequired===true;state.teacherSignupAllowed=status.teacherSignupAllowed===true;state.teacher=status.teacher||null;state.student=status.student||null;await routePage();consumeProviderLoginMarker();}catch(error){showError(error);main.replaceChildren(empty('Your workspace could not be opened.'),button('Try again',start,'primary'));}}
 start();

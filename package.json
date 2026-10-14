@@ -7,7 +7,8 @@
     "start": "bun src/server.ts",
     "check": "tsc --noEmit",
     "build": "bun build src/server.ts --target=bun --packages=external --outdir=dist",
-    "self-check": "bun scripts/self-check.ts"
+    "self-check": "bun scripts/self-check.ts",
+    "skill:sync": "bun scripts/sync-design-brief-skill.ts"
   },
   "dependencies": {
     "mathjs": "^15.0.0",

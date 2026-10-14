@@ -1,6 +1,6 @@
 import { serve } from 'bun';
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import { extname, join } from 'node:path';
 import QRCode from 'qrcode';
 import { decryptSecret, encryptSecret, ensureMasterKey, hashPassword, hashToken, newId, randomToken, RateLimiter, verifyPassword } from './auth';
@@ -12,12 +12,13 @@ import type { MessageRow, ParticipantRow, ProviderRow, RunRow, SpaceRow, StoredP
 import { extractMaterial, isImageMaterial, MAX_FILE_BYTES, validateMaterialInput } from './files';
 import { buildSystemPrompt, generateRunCode, isRunExpired, studentSpace, toolEnabled, validateSpacePatch } from './spaces';
 import type { SpacePatch } from './spaces';
-import { complete, generateImage, listModels, PRESETS, validateConnection, validateProvider } from './providers';
+import { complete, generateImage, listModels, PRESETS, PROVIDER_LIMITS, validateConnection, validateProvider } from './providers';
 import { assertKeychainDestination, listKeychainEntries, resolveKeychainKey } from './keychain';
 import { assertGoogleGrant, assertOAuthDestination, exchangeOAuthCode, geminiOAuthSettings, oauthAuthorizationUrl, oauthCallbackUrl, oauthProviders, parseOAuthCredential, refreshGoogleCredential } from './oauth';
 import type { GeminiOAuthSettings, OAuthCredential } from './oauth';
 import { assessTask } from './assessment';
 import { acknowledgeAlert, createAlertTables, listAlerts, recordAlerts } from './safeguarding';
+import type { TeacherAlert } from './safeguarding';
 import type { ChatMessage, Material, Message, MessageFeedback, OAuthProvider, OutcomeInsight, Participant, ProviderConfig, ProviderConnection, ProviderKind, Run, Space, SpaceType, StudentInsight, Teacher } from './types';
 import { asMaterials, asSpaceType, asStudentInsight, isJsonValue, isRecord, parseJson, TOOL_TYPES } from './validate';
 
@@ -35,6 +36,13 @@ export interface AppOptions {
 export interface AppHandle {
   fetch(req: Request, server?: ServerLike): Promise<Response> | Response;
   close(): void;
+}
+
+interface ClassroomGroup { key: string; label: string; participantIds: string[] }
+interface ActivityEvent {
+  id: string; participantId: string; studentName: string;
+  kind: 'joined' | 'message' | 'work' | 'assessment' | 'alert';
+  label: string; summary: string; createdAt: string; sourceId?: string; severity?: 'attention' | 'urgent';
 }
 
 class HttpError extends Error {
@@ -178,6 +186,71 @@ function alignOutcomeInsights(canonical: readonly string[], rows: readonly Outco
   });
 }
 
+/** Live groups and a bounded feed from the same authorized, persisted classroom snapshot. */
+function classroomSignals(participants: Participant[], alerts: TeacherAlert[]) {
+  const activity = new Map<string, ClassroomGroup>(), interaction = new Map<string, ClassroomGroup>();
+  const activityFeed: ActivityEvent[] = [];
+  const statusLabels = { 'not-assessed': 'Not yet assessed', pending: 'Assessment pending', unavailable: 'Assessment unavailable' };
+  const interactionLabels = {
+    'getting-started': 'Getting started', 'on-track': 'On track', deepening: 'Deepening',
+    'needs-guidance': 'Needs guidance', struggling: 'Struggling', discouraged: 'Discouraged',
+    frustrated: 'Frustrated', 'off-task': 'Off task',
+  };
+  function addGroup(groups: Map<string, ClassroomGroup>, key: string, label: string, participantId: string) {
+    let group = groups.get(key);
+    if (!group) { group = { key, label, participantIds: [] }; groups.set(key, group); }
+    group.participantIds.push(participantId);
+  }
+  for (const participant of participants) {
+    const criteria = participant.taskProgressMeta?.criteria ?? [];
+    if (participant.progressStatus !== 'current') {
+      addGroup(activity, participant.progressStatus, statusLabels[participant.progressStatus], participant.id);
+    } else if (!criteria.length || !criteria.some(criterion => criterion.status !== 'not-started')) {
+      addGroup(activity, 'not-started', 'Not started — no task completion evidence yet', participant.id);
+    } else {
+      const index = criteria.findIndex(criterion => criterion.status !== 'complete');
+      if (index === -1) addGroup(activity, 'completed', 'Activity completed', participant.id);
+      else {
+        const criterion = criteria[index], unit = criterion.id.startsWith('agenda:') ? 'Step' : 'Target';
+        addGroup(activity, `${criterion.id}:${criterion.status}`,
+          `${unit} ${index + 1}: ${criterion.label} — ${criterion.status === 'partial' ? 'in progress' : 'next; not started'}`, participant.id);
+      }
+    }
+    const judgment = participant.progressStatus === 'current' ? participant.interaction : undefined;
+    if (judgment) addGroup(interaction, judgment.status, interactionLabels[judgment.status], participant.id);
+    else {
+      const key = participant.progressStatus === 'current' ? 'unknown' : participant.progressStatus;
+      addGroup(interaction, key, key === 'unknown' ? 'Not enough interaction evidence' : statusLabels[participant.progressStatus as keyof typeof statusLabels], participant.id);
+    }
+    activityFeed.push({
+      id: `joined:${participant.id}`, participantId: participant.id, studentName: participant.name,
+      kind: 'joined', label: 'Joined Space', summary: 'Joined this classroom activity.', createdAt: participant.createdAt,
+    });
+    for (const message of participant.messages) activityFeed.push({
+      id: `message:${message.id}`, participantId: participant.id, studentName: participant.name,
+      kind: 'message', label: message.role === 'user' ? 'Student message' : message.role === 'teacher' ? 'Teacher message' : 'AI reply',
+      summary: (message.content || 'Shared an attachment.').slice(0, 280), createdAt: message.createdAt, sourceId: message.id,
+    });
+    for (const work of participant.artifacts) activityFeed.push({
+      id: `work:${work.id}:${work.updatedAt}`, participantId: participant.id, studentName: participant.name,
+      kind: 'work', label: 'Saved work', summary: `${work.title} · ${work.type}`.slice(0, 280), createdAt: work.updatedAt, sourceId: work.id,
+    });
+    if (participant.progressStatus === 'current' && participant.taskProgressMeta) activityFeed.push({
+      id: `assessment:${participant.id}:${participant.taskProgressMeta.assessedAt}`,
+      participantId: participant.id, studentName: participant.name, kind: 'assessment', label: 'AI advisory update',
+      summary: (judgment?.summary || (participant.progress === null ? 'Not enough task evidence yet.' : `Task completion evidence: ${participant.progress}%. This is not a mastery score.`)).slice(0, 280),
+      createdAt: participant.taskProgressMeta.assessedAt, sourceId: judgment?.evidence[0]?.sourceId,
+    });
+  }
+  for (const alert of alerts) activityFeed.push({
+    id: `alert:${alert.id}`, participantId: alert.participantId, studentName: alert.studentName,
+    kind: 'alert', label: alert.category === 'support-needed' ? 'Support needed' : `${alert.severity === 'urgent' ? 'Urgent' : 'Attention'} · ${alert.category}`,
+    summary: alert.reason.slice(0, 280), createdAt: alert.createdAt, sourceId: alert.evidence[0]?.sourceId, severity: alert.severity,
+  });
+  activityFeed.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+  return { grouping: { activity: [...activity.values()], interaction: [...interaction.values()] }, activityFeed: activityFeed.slice(0, 200) };
+}
+
 export function createApp(opts: AppOptions): AppHandle {
   const db = openDb(opts.dataDir);
   const masterKey = ensureMasterKey(opts.dataDir);
@@ -197,11 +270,28 @@ export function createApp(opts: AppOptions): AppHandle {
   let closed = false;
 
   // ---------- generic helpers ----------
+  function studentJoinUrl(code: string): string {
+    const url = new URL('/', baseUrl);
+    url.searchParams.set('code', code);
+    return url.href;
+  }
+
 
   function clientIp(req: Request, server?: ServerLike): string {
     const info = server?.requestIP?.(req);
     if (!info) return '127.0.0.1'; // direct handler invocation (self-check): loopback
     return info.address.replace(/^::ffff:/, '');
+  }
+
+  /**
+   * Account creation (first-run setup and signup) is machine-local in two independent senses:
+   * only the real peer address may call it, and the request must address this machine by name.
+   * The peer alone is not enough — a rebinding page can point its own Host at 127.0.0.1 and
+   * bring a matching Origin with it.
+   */
+  function isLocalAccountRequest(url: URL, ip: string): boolean {
+    if (ip !== '127.0.0.1' && ip !== '::1') return false;
+    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
   }
 
   function checkCsrf(req: Request): void {
@@ -403,6 +493,7 @@ export function createApp(opts: AppOptions): AppHandle {
     if (!row) return null;
     const run = runFromRow(loadRunRow(row.run_id)), participant = fullParticipant(row);
     const fingerprint = hashToken(JSON.stringify({
+      monitoringSchema: 2,
       instructions: run.space.instructions, agenda: run.space.agenda, outcomes: run.space.outcomes,
       sessionPrompt: run.sessionPrompt, subject: run.space.subject, gradeLevel: run.space.gradeLevel,
       materials: run.space.materials.map(material => ({ id: material.id, text: material.text })),
@@ -469,7 +560,7 @@ export function createApp(opts: AppOptions): AppHandle {
   });
 
   /** Student-facing view of a participant: teacher-only assessment fields are dropped here. */
-  function publicParticipant(participant: Participant): Omit<Participant, 'insights'> {
+  function publicParticipant(participant: Participant): Omit<Participant, 'insights' | 'interaction' | 'taskProgressMeta'> {
     return {
       id: participant.id,
       runId: participant.runId,
@@ -1302,6 +1393,7 @@ export function createApp(opts: AppOptions): AppHandle {
       const student = getStudent(req);
       return json({
         setupRequired: teacherCount === 0,
+        teacherSignupAllowed: isLocalAccountRequest(url, ip),
         teacher,
         student: student
           ? { id: student.participantRow.id, name: student.participantRow.name, runId: student.participantRow.run_id }
@@ -1310,7 +1402,7 @@ export function createApp(opts: AppOptions): AppHandle {
     }
 
     if (path === '/api/setup' && method === 'POST') {
-      if (ip !== '127.0.0.1' && ip !== '::1') throw new HttpError(403, 'Initial setup is only allowed from this computer');
+      if (!isLocalAccountRequest(url, ip)) throw new HttpError(403, 'Initial setup is only allowed from this computer; open the app at 127.0.0.1 or localhost');
       if (!limiter.allow(`setup:${ip}`, 5, 60_000)) throw new HttpError(429, 'Too many attempts; slow down');
       const teacherCount = (db.query('SELECT COUNT(*) AS n FROM teachers').get() as { n: number }).n;
       if (teacherCount > 0) throw new HttpError(400, 'Setup is already complete; sign in instead');
@@ -1321,9 +1413,44 @@ export function createApp(opts: AppOptions): AppHandle {
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, 'email is not valid');
       const password = requirePassword(body.password);
       const id = newId();
-      db.query('INSERT INTO teachers(id, name, email, pass_hash, admin, custom_instructions, created_at) VALUES (?,?,?,?,1,\'\',?)').run(
-        id, name, email, await hashPassword(password), nowIso(),
-      );
+      const passwordHash = await hashPassword(password);
+      db.transaction(() => {
+        if (db.query('SELECT 1 FROM teachers LIMIT 1').get()) throw new HttpError(400, 'Setup is already complete; sign in instead');
+        db.query('INSERT INTO teachers(id, name, email, pass_hash, admin, custom_instructions, created_at) VALUES (?,?,?,?,1,\'\',?)').run(
+          id, name, email, passwordHash, nowIso(),
+        );
+      })();
+      const token = createTeacherSession(id);
+      const teacher = teacherFromRow(db.query('SELECT * FROM teachers WHERE id = ?').get(id) as TeacherRow);
+      return json({ teacher }, 200, { 'Set-Cookie': sessionSetCookie(TEACHER_COOKIE, token, TEACHER_SESSION_DAYS) });
+    }
+
+    // Self-service account for teachers sharing this computer's install. /api/setup creates
+    // the one administrator; every account created here is an ordinary teacher.
+    if (path === '/api/signup' && method === 'POST') {
+      if (!isLocalAccountRequest(url, ip)) throw new HttpError(403, 'Teacher signup is only allowed from this computer; open the app at 127.0.0.1 or localhost, or ask an administrator to create your account');
+      if (!limiter.allow(`signup:${ip}`, 20, 60_000)) throw new HttpError(429, 'Too many sign-up attempts; wait a minute');
+      if (!db.query('SELECT 1 AS x FROM teachers LIMIT 1').get()) throw new HttpError(400, 'Finish first-run setup to create the administrator account, then sign up here');
+      const body = await parseBody(req);
+      if (!isRecord(body)) throw new HttpError(400, 'body must be an object');
+      const name = requireString(body.name, 'name', 1, 100);
+      const email = requireString(body.email, 'email', 3, 200).toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, 'email is not valid');
+      // Own password only (no username fallback), and a client-supplied admin flag is ignored.
+      const password = requirePassword(body.password);
+      if (db.query('SELECT 1 AS x FROM teachers WHERE email = ?').get(email)) throw new HttpError(409, 'A teacher with that email already exists');
+      const passwordHash = await hashPassword(password);
+      const id = newId();
+      try {
+        db.query('INSERT INTO teachers(id, name, email, pass_hash, admin, custom_instructions, created_at) VALUES (?,?,?,?,0,\'\',?)').run(
+          id, name, email, passwordHash, nowIso(),
+        );
+      } catch (error) {
+        // The UNIQUE COLLATE NOCASE index has the final say: a signup racing this one for the
+        // same address can still land between the lookup above and this insert.
+        if (!(error instanceof Error && /UNIQUE constraint failed/i.test(error.message))) throw error;
+        throw new HttpError(409, 'A teacher with that email already exists');
+      }
       const token = createTeacherSession(id);
       const teacher = teacherFromRow(db.query('SELECT * FROM teachers WHERE id = ?').get(id) as TeacherRow);
       return json({ teacher }, 200, { 'Set-Cookie': sessionSetCookie(TEACHER_COOKIE, token, TEACHER_SESSION_DAYS) });
@@ -1605,7 +1732,7 @@ export function createApp(opts: AppOptions): AppHandle {
     if (path === '/api/providers' && method === 'GET') {
       requireTeacher(req);
       const rows = db.query('SELECT * FROM providers ORDER BY created_at').all() as ProviderRow[];
-      return json({ providers: rows.map((r) => publicProvider(providerFromRow(r))), presets: PRESETS, oauthProviders: oauthProviders(googleOAuth) });
+      return json({ providers: rows.map((r) => publicProvider(providerFromRow(r))), presets: PRESETS, limits: PROVIDER_LIMITS, oauthProviders: oauthProviders(googleOAuth) });
     }
 
     if (path === '/api/provider-oauth/start' && method === 'POST') {
@@ -1981,7 +2108,8 @@ export function createApp(opts: AppOptions): AppHandle {
       const teacher = requireTeacher(req);
       const row = loadRunRow(runId.id);
       requireRunAccess(teacher, row);
-      return json({ run: runFromRow(row) });
+      const run = runFromRow(row);
+      return json({ run, joinUrl: studentJoinUrl(run.code) });
     }
 
     if (runId && method === 'PATCH') {
@@ -2034,16 +2162,19 @@ export function createApp(opts: AppOptions): AppHandle {
         'SELECT t.* FROM collaborators c JOIN teachers t ON t.id = c.teacher_id WHERE c.run_id = ?',
       ).all(row.id) as TeacherRow[];
       for (const participant of participantRows) {
-        const stored = db.query('SELECT 1 FROM participant_assessments WHERE participant_id = ?').get(participant.id);
-        if (!stored) queueAssessment(participant.id);
+        queueAssessment(participant.id);
       }
+      const participants = participantRows.map((participant) => participantFromRow(db, participant));
+      const alerts = listAlerts(db, row.id);
       return json({
         run: runFromRow(row),
-        participants: participantRows.map((r) => participantFromRow(db, r)),
+        participants,
         summary: runSummaryFromRow(row),
         collaborators: collabRows.map((t) => ({ id: t.id, name: t.name, email: t.email })),
-        alerts: listAlerts(db, row.id),
+        alerts,
         monitoring: monitoringStatus(row.id),
+        ...classroomSignals(participants, alerts),
+        observedAt: nowIso(),
       });
     }
 
@@ -2081,7 +2212,7 @@ export function createApp(opts: AppOptions): AppHandle {
       const row = loadRunRow(runQr.id);
       requireRunAccess(teacher, row);
       const run = runFromRow(row);
-      const svg = await QRCode.toString(`${baseUrl}/?code=${run.code}`, { type: 'svg', margin: 1, width: 256 });
+      const svg = await QRCode.toString(studentJoinUrl(run.code), { type: 'svg', margin: 1, width: 256 });
       return new Response(svg, { headers: { 'Content-Type': 'image/svg+xml', ...SECURITY_HEADERS } });
     }
 
@@ -2175,10 +2306,15 @@ export function createApp(opts: AppOptions): AppHandle {
 }
 
 if (import.meta.main) {
-  const host = process.env.HOST ?? '127.0.0.1';
+  const host = process.env.HOST ?? '0.0.0.0';
   const port = Number(process.env.PORT ?? 9272);
   const dataDir = process.env.DATA_DIR ?? join(homedir(), '.local', 'share', 'classroomai');
-  const baseUrl = process.env.BASE_URL ?? `http://${host}:${port}`;
+  const lanAddress = Object.entries(networkInterfaces())
+    .filter(([name]) => /^(en\d|eth\d|wlan\d|wlp|eno|ens|enp|Wi-Fi|Ethernet)/i.test(name))
+    .flatMap(([, addresses]) => addresses ?? [])
+    .find(address => address.family === 'IPv4' && !address.internal)?.address;
+  const advertisedHost = host === '0.0.0.0' || host === '::' ? lanAddress ?? '127.0.0.1' : host;
+  const baseUrl = process.env.BASE_URL ?? `http://${advertisedHost.includes(':') ? `[${advertisedHost}]` : advertisedHost}:${port}`;
   const app = createApp({ dataDir, baseUrl });
   serve({
     hostname: host,
@@ -2188,4 +2324,6 @@ if (import.meta.main) {
     fetch: (req, server) => app.fetch(req, server),
   });
   console.log(`ClassRoomAI listening on ${baseUrl} (data: ${dataDir})`);
+  if (!process.env.BASE_URL && (host === '0.0.0.0' || host === '::') && !lanAddress)
+    console.warn('No physical LAN IPv4 address found. Set BASE_URL to the address students can reach.');
 }

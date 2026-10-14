@@ -1,4 +1,4 @@
-import type { AgendaStep, JsonValue, Material, SafeguardingFinding, SpaceType, StudentInsight, TaskAssessment, TaskCriterionResult, TaskEvidence } from './types';
+import type { AgendaStep, InteractionAssessment, JsonValue, Material, SafeguardingFinding, SpaceType, StudentInsight, TaskAssessment, TaskCriterionResult, TaskEvidence } from './types';
 
 /** Tool types a teacher can enable; also the allowed artifact types. */
 export const TOOL_TYPES: Record<string, true> = {
@@ -163,12 +163,24 @@ export function asTaskAssessment(value: unknown): TaskAssessment {
     if (item.status !== 'not-started' && !evidence.length) throw new Error('Task completion needs evidence.');
     return { id: item.id, label: item.label, status: item.status, evidence };
   });
-  if (!Array.isArray(value.alerts) || value.alerts.length > 20) throw new Error('Invalid task alerts.');
+  const INTERACTION_STATUSES = ['getting-started', 'on-track', 'deepening', 'needs-guidance', 'struggling', 'discouraged', 'frustrated', 'off-task'];
+  let interaction: InteractionAssessment | null = null;
+  if (value.interaction !== undefined && value.interaction !== null) {
+    const item = value.interaction;
+    if (!isRecord(item) || typeof item.status !== 'string' || !INTERACTION_STATUSES.includes(item.status)) throw new Error('Invalid interaction status.');
+    if (typeof item.summary !== 'string' || !item.summary.trim() || item.summary.length > 1200) throw new Error('Invalid interaction summary.');
+    const interactionEvidence = evidenceList(item.evidence);
+    if (!interactionEvidence.length || interactionEvidence.length > 12) throw new Error('Invalid interaction evidence.');
+    interaction = { status: item.status as InteractionAssessment['status'], summary: item.summary, evidence: interactionEvidence };
+  }
+  // Twenty model findings plus one reserved, evidence-grounded support signal.
+  if (!Array.isArray(value.alerts) || value.alerts.length > 21) throw new Error('Invalid task alerts.');
   const alerts: SafeguardingFinding[] = value.alerts.map(item => {
-    if (!isRecord(item) || (item.category !== 'off-task' && item.category !== 'inappropriate' && item.category !== 'danger') || (item.severity !== 'attention' && item.severity !== 'urgent') || typeof item.reason !== 'string') throw new Error('Invalid task alert.');
+    if (!isRecord(item) || (item.category !== 'off-task' && item.category !== 'inappropriate' && item.category !== 'danger' && item.category !== 'support-needed') || (item.severity !== 'attention' && item.severity !== 'urgent') || typeof item.reason !== 'string') throw new Error('Invalid task alert.');
+    if (item.category === 'support-needed' && item.severity !== 'attention') throw new Error('Invalid task alert.');
     return { category: item.category, severity: item.severity, reason: item.reason, evidence: evidenceList(item.evidence) };
   });
-  return { progress: value.progress, progressEvidence, criteria, alerts, assessedAt: value.assessedAt };
+  return { progress: value.progress, progressEvidence, criteria, interaction, alerts, assessedAt: value.assessedAt };
 }
 
 export function asRunSummary(x: unknown): RunSummary {

@@ -15,6 +15,15 @@ Provider connections belong to this ClassRoomAI installation. An administrator c
 
 A catalogue lists model identifiers, not your entitlement to use them. Test the chosen model: credits, plan limits, modality support and API compatibility still apply.
 
+## Defaults and token budgets
+
+Configured DeepSeek is preferred for new Spaces, and the connection editor starts from its preset. DeepSeek defaults are **32,000 output tokens / 240,000 context characters**. These are application budgets, not model maxima: [DeepSeek documents](https://api-docs.deepseek.com/quick_start/pricing) a 1M-token context and up to 384K output for `deepseek-flash`. Context characters are not tokens. The output budget is a ceiling, not a required response length.
+
+Other providers default to 16,384 output tokens / 60,000 context characters. The app accepts up to 128,000 output tokens / 2,000,000 context characters; the selected provider/model may impose lower limits. Explicit stored budgets are never silently raised.
+
+Use **Token limits** in the Space editor to change the selected connection without discarding the draft, or edit its **Advanced connection settings** under Providers. Only administrators can save these installation-wide budgets. Incomplete structured responses still fail explicitly; no partial design or replacement response is applied.
+
+
 ## Presets
 
 | Provider | API base URL | Initial model example |

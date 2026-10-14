@@ -27,7 +27,8 @@ interface MessageSourceRow { id: string; role: string; content: string; attachme
 interface ArtifactSourceRow { id: string; type: string; data: string }
 interface AlertEvidenceSource { role: 'student' | 'assistant' | 'student-work'; text: string }
 
-const MAX_FINDINGS = 20;
+// Twenty model findings plus one derived support-needed signal.
+const MAX_FINDINGS = 21;
 const MAX_EVIDENCE_PER_FINDING = 12;
 const MAX_REASON_CHARS = 2000;
 
@@ -58,7 +59,8 @@ export function createAlertTables(db: Database): void {
 /**
  * Persist admissible alerts for one participant. Evidence is re-validated against persisted
  * student-owned messages/attachments/artifacts and assistant messages only for inappropriate/danger,
- * so forged IDs, teacher quotes, off-task assistant quotes, and absent verbatim quotes cannot alert.
+ * so forged IDs, teacher quotes, off-task or support-needed assistant quotes, and absent verbatim
+ * quotes cannot alert. Support-needed findings are attention-only advisory signals.
  * Alerts dedupe on participant + category + sorted evidence source ids; acknowledged alerts are not
  * re-opened for the same evidence, while genuinely new evidence still alerts.
  */
@@ -78,8 +80,9 @@ export function recordAlerts(db: Database, run: Run, participant: Participant, f
     if (!isRecord(candidate)) continue;
     const category = candidate.category;
     const severity = candidate.severity;
-    if (category !== 'off-task' && category !== 'inappropriate' && category !== 'danger') continue;
+    if (category !== 'off-task' && category !== 'inappropriate' && category !== 'danger' && category !== 'support-needed') continue;
     if (severity !== 'attention' && severity !== 'urgent') continue;
+    if (category === 'support-needed' && severity !== 'attention') continue;
     const evidence = admissibleEvidence(candidate.evidence, sources, category);
     if (evidence.length === 0) continue;
     const aiOutput = evidence.some((entry) => sources.get(entry.sourceId)?.role === 'assistant');
@@ -127,8 +130,9 @@ export function acknowledgeAlert(db: Database, runId: string, alertId: string, t
 }
 
 function alertFromRow(row: AlertRow): TeacherAlert | null {
-  if (row.category !== 'off-task' && row.category !== 'inappropriate' && row.category !== 'danger') return null;
+  if (row.category !== 'off-task' && row.category !== 'inappropriate' && row.category !== 'danger' && row.category !== 'support-needed') return null;
   if (row.severity !== 'attention' && row.severity !== 'urgent') return null;
+  if (row.category === 'support-needed' && row.severity !== 'attention') return null;
   const evidence: TaskEvidence[] = [];
   try {
     const parsed: unknown = parseJson(row.evidence);

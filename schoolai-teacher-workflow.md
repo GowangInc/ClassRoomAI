@@ -67,3 +67,23 @@ The local app is framed around MYP / DP English A close reading, authorial choic
 - Teacher and student layouts were rechecked against the authenticated SchoolAI reference in the user's real Chrome session. The local teacher surface now uses a compact sidebar/header, grouped configuration tabs and a right-hand saved-template preview. The student surface uses a narrow central conversation, independently scrolling messages, an anchored composer, and on-demand plan, tools and reading panels.
 - Real Chrome checks used a separate temporary ClassRoomAI database, with teacher and student roles on separate loopback hostnames. Review/apply did not save automatically; preview did not launch a session. Native message submission, persisted feedback, saved document/mindmap/graph work, live teacher monitoring, pause/resume with preserved drafts, and a 390-pixel student viewport were exercised. No audio or microphone access was activated.
 - Provider catalogues were reachable during some checks. Catalogue access did not establish generation entitlement or model availability. Successful design-review and student-conversation checks used explicitly labeled protocol fixtures, not proof of live model inference. Existing Keychain entries were not changed.
+
+## Local provider, access, and monitoring follow-up
+
+- Configured DeepSeek is preferred for new Spaces; existing saved Spaces retain their chosen connection. New DeepSeek connections use 32,000 output tokens and 240,000 context characters. In-place token editing preserved an unsaved draft, and a real configured-provider design request returned a usable review draft.
+- The built app advertised a physical LAN IPv4 address. An isolated synthetic learner joined over that LAN origin; a teacher using localhost saw the same LAN join link and a rendered QR code. Cross-device reachability was checked separately.
+- Teacher signup is machine-local. Fresh-install signup creates the first administrator; later signups create ordinary teachers. Browser checks covered duplicate-email feedback, sign-in, reload persistence, mobile layout, and rejection of LAN signup requests without blocking student joining.
+- Chat request and mind-map node identifiers use secure randomness available over plain LAN HTTP. A synthetic browser check verified sending, saving and reloading a mind map, and retrying a lost completed-chat response without duplicating the turn.
+- Saved chat turns and work changes trigger background task and interaction assessment. A live synthetic student message appeared in the teacher's support alerts and Space-wide feed without a page reload. Activity and interaction filters combined by intersection, and new evidence updated the groups.
+- Exact-source review and acknowledgement were exercised. Selected learner, focused intervention draft, and feed position survived live updates. Connection-loss/recovery states and a 390-pixel viewport were checked.
+- Semantic fixtures verify application behavior, not model judgment accuracy. A separate configured-provider check confirmed a support-needed assessment and exact-source navigation; it does not establish general safeguarding accuracy or recall.
+
+The project design-brief skill is shipped in `skills/classroomai-design-brief/SKILL.md`. `bun run skill:sync` copies it to the user's shared skill store and verifies equality; this command does not prove synchronization to another machine.
+
+## Monitoring references
+
+- [Mission Control guide](https://help.schoolai.com/en/articles/15243484-your-guide-to-mission-control)
+- [Student safety alerts](https://help.schoolai.com/en/articles/14756370-student-safety-critical-alerts-real-time-monitoring)
+- [Student Insights dashboard](https://help.schoolai.com/en/articles/16192386-student-insights-dashboard)
+
+Read-only observation of multiple Spaces distinguished task progress, interaction headlines, rolling student notes, and alert-to-conversation navigation. These distinctions inform ClassRoomAI's own advisory monitoring; they do not imply access to SchoolAI's proprietary implementation or establish plan entitlement.

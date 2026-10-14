@@ -212,6 +212,7 @@ export function participantFromRow(db: Database, row: ParticipantRow): Participa
         p.progress = result.progress;
         p.progressEvidence = result.progressEvidence;
         p.taskProgressMeta = { criteria: result.criteria, assessedAt: result.assessedAt };
+        if (result.interaction) p.interaction = result.interaction;
       } catch { p.progressStatus = 'unavailable'; }
     }
   }

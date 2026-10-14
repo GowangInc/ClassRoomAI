@@ -76,10 +76,10 @@ bun run start
 ```
 
 5. Open **http://127.0.0.1:9272** on the host computer.
-6. Create the first administrator account.
+6. Choose **Create teacher account**. The first teacher account administers this installation.
 7. Open **Providers** and configure a usable AI connection.
 
-First-run account creation only accepts a direct loopback connection. Complete it on the host before enabling LAN or proxy access.
+Teacher account creation, including first-run setup and self-signup, only accepts a direct loopback connection addressed to `127.0.0.1` or `localhost`. Use the host address above, even though the server also listens on the LAN. Student joining and existing teacher sign-in remain available over the classroom network.
 
 There is no default administrator account or password. The account email is a sign-in identifier. The app does not send invitation or password-reset emails.
 
@@ -113,6 +113,13 @@ Launching captures the Space content in a session snapshot. Later template edits
 The editor groups settings under **Details, Prompt, Context, Outcomes, Agenda, Audience, Tools & media, and Publishing**.
 
 AI design suggestions remain separate from the saved template. Review the draft, apply it to the form, and save explicitly. Neither applying a draft nor previewing launches a session.
+
+### Design-brief agent skill
+
+The project skill is [`skills/classroomai-design-brief/SKILL.md`](skills/classroomai-design-brief/SKILL.md). Ask an agent to use **classroomai-design-brief** to produce paste-ready teaching guidance. The 12,000-character request limit includes the current draft context appended by the editor.
+
+After editing the project skill, run `bun run skill:sync`. It refreshes `~/Sync/shared/skills/classroomai-design-brief/SKILL.md` and verifies byte equality. Fleet agents use the shared store through their existing skill-directory symlinks. This is an explicit update command, not a file watcher or a machine-specific symlink into the project.
+
 
 ### Example: a close-reading Space
 
@@ -159,6 +166,8 @@ Open a session from **Student insights** to review its participants.
 You can:
 
 - Read a participant's conversation and saved work.
+- Follow a live feed of messages, saved work, advisory updates, and alerts across the Space.
+- Filter learners by activity stage and interaction quality, with current group counts.
 - Send a clearly labeled teacher message.
 - Pause or resume one learner, or the classroom.
 - End the classroom session.
@@ -188,9 +197,25 @@ Task completion is **not** a mastery score, a grade, or proof of independent aut
 
 The interface distinguishes **not assessed**, **pending**, **current**, and **unavailable**. An unavailable assessment is not zero progress or an all-clear.
 
-### Safeguarding alerts
+### Live activity and interaction groups
+
+Saved chat turns and saved-work changes queue a background assessment with the Space's configured provider, even when no teacher dashboard is open. Unsent typing is not assessed. These assessments make additional provider requests and take time to finish; unchanged dashboard polls do not request another assessment. The visible dashboard refreshes every three seconds, shows a checked-at time, and marks the last snapshot **stale** if the connection fails. Existing work remains visible.
+
+**Activity stage** groups use the actual agenda or outcome criteria: not started, a named step in progress, the next unfinished step, or completed. Pending, unavailable, and unassessed work have separate groups. Message count is never a substitute for task evidence.
+
+**Interaction** groups describe current student-owned evidence: Getting started, On track, Deepening, Needs guidance, Struggling, Discouraged, Frustrated, or Off task. These are advisory task-specific signals, not mastery scores, personality labels, grades, or diagnoses. Ordinary clarification does not automatically create a support alert.
+
+Both filters combine: select a stage and an interaction to see learners matching both. **Show all learners** resets them. Manually generated mastery insights and group synthesis remain separate from these automatic views.
+
+The **Space activity feed** shows the latest 200 recorded events across all learners, independent of the selected learner or filters. AI advisory updates are identified separately from recorded messages and saved work. **Review learner & evidence** opens the associated conversation message or work; attachment citations lead to the containing message. Polls retain the selected learner, unsent intervention drafts, focus, and the reading position in the feed.
+
+SchoolAI's [Mission Control guide](https://help.schoolai.com/en/articles/15243484-your-guide-to-mission-control), [alert guide](https://help.schoolai.com/en/articles/14756370-student-safety-critical-alerts-real-time-monitoring), and [Student Insights guide](https://help.schoolai.com/en/articles/16192386-student-insights-dashboard) informed these distinctions. Read-only observation of four signed-in Spaces confirmed separate progress/headline views, rolling student notes, Smart Groups/List controls, and alert-to-conversation navigation. This does not establish which grouping or follow-up functions are available under every SchoolAI plan.
+
+### Teacher alerts: support and safeguarding
 
 The teacher alert panel supports:
+
+- **Support needed:** evidence of being blocked, struggling, discouraged, or frustrated with the task. This uses **Attention**, not **Urgent**, and invites a teacher check-in.
 
 - Sustained, clearly unrelated off-task behavior.
 - Inappropriate content.
@@ -200,6 +225,8 @@ The teacher alert panel supports:
 Off-task alerts require citations from multiple distinct student messages. The assessment instructions exclude a lone joke, related curiosity, and ordinary academic discussion.
 
 Alerts show severity, quoted evidence, **Review student**, and **Acknowledge**. Acknowledgements persist. Reassessment of the same evidence does not reopen an acknowledged alert.
+
+Support-needed alerts use student-owned evidence, never the assistant's reassurance. Urgent safety signals have a separate count and emphasis. Alerts also appear on learner cards and their cited conversation messages. These notifications stay in the local teacher dashboard; no email or external notification is sent.
 
 **These are advisory AI judgments.** A model can miss a concern or misread its context. Exact citations do not make its interpretation correct.
 
@@ -220,6 +247,10 @@ An administrator adds connections under **Providers**. Teachers select these ins
 5. Test the selected model before classroom use.
 
 API-key entry and model selection remain visible. **Advanced connection settings** contains the endpoint, API format, image model, and context/output limits.
+
+Configured DeepSeek is selected automatically for new Spaces; existing Spaces retain their provider. New DeepSeek connections start with **32,000 output tokens** and **240,000 context characters**. Other connections start with 16,384 output tokens and 60,000 context characters. Explicit saved limits remain unchanged until edited.
+
+Administrators can use **Token limits** beside the editor's model selector without navigating away or losing the unsaved Space. Budgets are shared by all Spaces using that connection. **Configure providers (new tab)** preserves the editor while opening full settings.
 
 Supported formats are OpenAI-compatible Chat Completions, Anthropic Messages, and Google Gemini. An arbitrary REST endpoint or Responses-only model is not automatically compatible.
 
@@ -251,14 +282,11 @@ Using a local server can keep model inference local. YouTube and browser speech 
 
 ## Classroom network hosting
 
-The default address works only on the host computer. To serve other devices, use a reachable LAN address.
+`bun run start` listens on all interfaces and advertises the first detected physical LAN IPv4 address. The startup message shows the student-facing URL. Teachers may still use `http://127.0.0.1:9272`; invitation links and QR codes use the same server-configured LAN origin, not the teacher browser's origin.
 
-1. Complete first-run setup on the host.
-2. Stop the server.
-3. Find the host's current LAN IP address.
-4. Restart with that address in `BASE_URL`.
+Complete first-run setup on localhost. Then share the generated LAN join link with students on a reachable network. Restart after changing networks so automatic address detection refreshes.
 
-Example for a macOS/Linux shell:
+If the host has several network adapters, or detection selects the wrong one, choose the reachable address explicitly. Example for a macOS/Linux shell:
 
 ```sh
 HOST=0.0.0.0 PORT=9272 BASE_URL=http://192.168.1.50:9272 bun run start
@@ -268,9 +296,11 @@ Replace `192.168.1.50` with the host's actual address. Students open that URL or
 
 - `0.0.0.0` is a listening address, not a browser destination.
 - `localhost` on a student's device points to that device, not the classroom host.
-- A changed network address requires an updated `BASE_URL`.
+- After changing networks, restart the server; update an explicit `BASE_URL` if one was set.
 - Host firewalls and school Wi-Fi client isolation can block access.
 - Stop the current instance before starting another on the same port.
+- To disable LAN hosting, start with `HOST=127.0.0.1 bun run start`.
+- Provider OAuth requires HTTPS or loopback HTTP; an ordinary LAN HTTP origin cannot be its callback.
 
 The shell syntax above is not PowerShell syntax. Windows hosting has not been verified.
 
@@ -282,11 +312,18 @@ GitHub stores the source code. GitHub Pages cannot run this Bun/SQLite server.
 
 ## Accounts and passwords
 
-Administrators manage teacher accounts through **Profile**. Teachers use **Change password** there to change their own password.
+Open **http://127.0.0.1:9272/#/signup** on the computer running ClassRoomAI, or choose **Create teacher account** from the sign-in page. Enter your name, email sign-in identifier, and a password. Account creation signs you into your workspace.
+
+The first teacher account is the installation administrator and can configure AI providers. Later self-signups create ordinary teacher accounts; they cannot manage provider credentials or other accounts, or read another teacher's private Spaces.
+
+Each teacher's own installation has its own accounts, database, and provider configuration. There is no shared cloud account or verification email. Installing ClassRoomAI on a second device does not transfer an account.
+
+Self-signup is unavailable through LAN URLs. An administrator can still add accounts and reset passwords through **Profile**. Teachers use **Change password** there to change their own password.
 
 - The first administrator chooses a password explicitly.
 - A new teacher needs a name and an email sign-in identifier.
-- A blank initial teacher password uses the first four characters before `@` in the lowercased email.
+- Self-signup requires an explicitly chosen password; it never uses a username default.
+- For accounts an administrator adds through **Profile**, a blank initial password uses the first four characters before `@` in the lowercased email.
 - If that username has fewer than four characters, the administrator must supply a password.
 - The configured minimum is four characters. The interface explains it on validation failure.
 - Teachers must provide their current password for self-service changes.
@@ -378,9 +415,9 @@ Set these variables in the process environment before starting the app. The LAN 
 
 | Variable | Default or purpose |
 | --- | --- |
-| `HOST` | `127.0.0.1`. Listening interface. Use `0.0.0.0` deliberately for LAN hosting |
+| `HOST` | `0.0.0.0`. Listens on all interfaces for LAN use. Set `127.0.0.1` for host-only use |
 | `PORT` | `9272`. Change it if another service uses the port |
-| `BASE_URL` | `http://HOST:PORT`. Set the actual browser-reachable origin for links, origin checks, and OAuth callbacks |
+| `BASE_URL` | Detected physical LAN IPv4 with `PORT` when listening on all interfaces; otherwise the explicit host with `PORT`. Override for multiple adapters, HTTPS, or a specific reachable origin |
 | `DATA_DIR` | `~/.local/share/classroomai`. Choose a private local directory |
 | `APP_SECRET` | Optional encryption-key override. Hex or Base64 encoding of at least 32 bytes. The first 32 bytes are used |
 | `GEMINI_OAUTH_CLIENT_ID` | Your registered Google OAuth client ID |
@@ -403,13 +440,19 @@ bun run build
 - **self-check:** local HTTP/SQLite behavior using isolated synthetic records and provider/OAuth fixtures.
 - **build:** creates `dist/server.js` for Bun.
 
-Stop any existing ClassRoomAI instance before `self-check`. It uses port 9272. Temporary test data remains in the operating system's temporary directory.
+`self-check` uses an OS-assigned loopback port; it can run alongside the normal app without using its database or displacing its listener. Temporary test data remains in the operating system's temporary directory.
 
-The checks cover authorization, credential handling, lifecycle, saved work, return access, password changes, evidence validation, alerts, and restart persistence.
+The checks cover local signup, concurrent first-run setup and duplicate emails, account permissions, credential handling, lifecycle, LAN HTTP-compatible client identifiers and chat replay, support-needed alerts, automatic activity/interaction group transitions, class-wide feed scoping, unchanged-work assessment caching, saved work, return access, password changes, evidence validation, alerts, and restart persistence.
 
 They do **not** prove live provider authorization, model accuracy, safeguarding recall, classroom capacity, or cross-platform compatibility.
 
 For manual testing, always set `DATA_DIR` to a fresh, separate QA directory. Do not use the classroom database as a test target.
+
+Teacher signup was also exercised in a browser against a separate synthetic-only installation: first-run administrator creation, ordinary teacher signup, duplicate-email feedback, keyboard sign-in, reload persistence, a 390-pixel viewport, and HTTP 403 for actual LAN signup requests. No synthetic signup accounts were added to the normal classroom database.
+
+Student chat and mind-map creation were exercised over plain LAN HTTP in a separate synthetic installation, where `crypto.randomUUID` is unavailable. A retry after losing a completed chat response reused its identifier without duplicating the turn; saved mind-map node links survived reload.
+
+Live teacher/student browser verification used a separate synthetic installation: a LAN student message surfaced a support alert and feed event without reloading the teacher page; filters combined by intersection; new evidence changed activity and interaction groups; selected learner, focused intervention draft, and feed scroll were preserved. Source review, acknowledgement, connection-loss/recovery status, and a 390-pixel viewport were also exercised. Semantic fixture labels verify application behavior, not model judgment accuracy.
 
 ### Run the built server
 

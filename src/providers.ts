@@ -18,12 +18,17 @@ import type { ChatMessage, ProviderConfig, ProviderConnection, ProviderKind, Pro
 
 const KINDS: readonly ProviderKind[] = ['openai', 'anthropic', 'gemini'];
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
-const MAX_MAX_OUTPUT_TOKENS = 32_000;
-
-const DEFAULT_CONTEXT_CHARS = 24_000;
-const MIN_CONTEXT_CHARS = 1_000;
-const MAX_CONTEXT_CHARS = 1_000_000;
+/**
+ * Budget defaults and hard bounds, exported so the settings screen and the API
+ * payload show exactly the numbers this module enforces.
+ */
+export const PROVIDER_LIMITS = {
+  defaultMaxOutputTokens: 16_384,
+  defaultContextChars: 60_000,
+  maxOutputTokens: 128_000,
+  minContextChars: 1_000,
+  maxContextChars: 2_000_000,
+};
 
 const CHAT_TIMEOUT_MS = 120_000;
 const IMAGE_TIMEOUT_MS = 180_000;
@@ -50,10 +55,10 @@ const ERROR_DETAIL_CHARS = 300;
 /* -------------------------------------------------------------------------- */
 
 /**
- * Optional starting points for the settings screen. No provider is selected
- * automatically and no key is ever pre-filled. Model ids stay editable because
- * vendor catalogues move; every value below is a plain OpenAI/Anthropic/Gemini
- * protocol endpoint.
+ * Optional starting points for the settings screen. No key is ever pre-filled;
+ * a preset's optional budgets apply only when a saved config points at exactly
+ * that preset endpoint. Model ids stay editable because vendor catalogues move;
+ * every value below is a plain OpenAI/Anthropic/Gemini protocol endpoint.
  */
 export const PRESETS: {
   id: string;
@@ -62,6 +67,9 @@ export const PRESETS: {
   baseUrl: string;
   model: string;
   imageModel?: string;
+  /** Starting budgets applied only when this exact endpoint is used. */
+  maxOutputTokens?: number;
+  contextChars?: number;
 }[] = [
   {
     id: 'openai',
@@ -119,6 +127,8 @@ export const PRESETS: {
     kind: 'openai',
     baseUrl: 'https://api.deepseek.com/v1',
     model: 'deepseek-flash',
+    maxOutputTokens: 32_000,
+    contextChars: 240_000,
   },
   {
     id: 'moonshot',
@@ -185,6 +195,7 @@ export const PRESETS: {
     model: '',
   },
 ];
+
 
 /* -------------------------------------------------------------------------- */
 /* Configuration validation                                                   */
@@ -282,14 +293,18 @@ export function validateProvider(input: unknown): ProviderConfig {
   const imageModel = optionalText(raw.imageModel, 'imageModel', MAX_MODEL_CHARS);
   const keychainId = optionalText(raw.keychainId, 'keychainId', MAX_ID_CHARS);
 
+  // A saved config that names a real endpoint starts from that endpoint's
+  // budgets; anything else starts from the generic defaults. Supplied values are
+  // never rewritten, however small.
+  const budgets = PRESETS.find(item=>item.kind===kind&&item.baseUrl.replace(/\/+$/,'')===baseUrl);
   const maxOutputTokens =
     raw.maxOutputTokens === undefined || raw.maxOutputTokens === null
-      ? DEFAULT_MAX_OUTPUT_TOKENS
-      : ensurePositiveInteger(raw.maxOutputTokens, 'maxOutputTokens', 1, MAX_MAX_OUTPUT_TOKENS);
+      ? budgets?.maxOutputTokens ?? PROVIDER_LIMITS.defaultMaxOutputTokens
+      : ensurePositiveInteger(raw.maxOutputTokens, 'maxOutputTokens', 1, PROVIDER_LIMITS.maxOutputTokens);
   const contextChars =
     raw.contextChars === undefined || raw.contextChars === null
-      ? DEFAULT_CONTEXT_CHARS
-      : ensurePositiveInteger(raw.contextChars, 'contextChars', MIN_CONTEXT_CHARS, MAX_CONTEXT_CHARS);
+      ? budgets?.contextChars ?? PROVIDER_LIMITS.defaultContextChars
+      : ensurePositiveInteger(raw.contextChars, 'contextChars', PROVIDER_LIMITS.minContextChars, PROVIDER_LIMITS.maxContextChars);
 
   const config: ProviderConfig = {
     id,

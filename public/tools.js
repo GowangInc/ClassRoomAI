@@ -5,7 +5,8 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const text = value => typeof value === 'string' ? value : '';
 const list = value => Array.isArray(value) ? value : [];
 const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
-const uid = () => crypto.randomUUID();
+// ponytail: opaque 128-bit IDs use getRandomValues, which also works over LAN HTTP.
+export const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 function node(tag, content, attrs = {}) {
   const element = document.createElement(tag);
   if (content !== undefined) element.textContent = String(content);
