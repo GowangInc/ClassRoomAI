@@ -11,6 +11,7 @@ This is an original implementation inspired by the Spaces workflow in [SchoolAI]
 ## Contents
 
 - [What it includes](#what-it-includes)
+- [Screenshots](#screenshots)
 - [Quick start](#quick-start)
 - [Your first classroom activity](#your-first-classroom-activity)
 - [Students: join, leave, and return](#students-join-leave-and-return)
@@ -42,6 +43,23 @@ This is an original implementation inspired by the Spaces workflow in [SchoolAI]
 
 The default design emphasizes MYP/DP English A rather than language acquisition. Teachers can adapt Spaces to other subjects.
 
+## Screenshots
+
+These are screenshots of the actual interface using fictional demo data. The AI replies, assessments, and alert labels shown use synthetic fixtures; they do not demonstrate model judgment accuracy.
+
+### Space editor
+
+![ClassRoomAI teacher Space editor](screenshots/space-editor.png)
+
+### Student conversation
+
+![ClassRoomAI student conversation](screenshots/student-chat.png)
+
+### Teacher monitoring
+
+![ClassRoomAI teacher monitoring dashboard](screenshots/teacher-monitoring.png)
+
+
 ## Quick start
 
 ### What you need
@@ -67,7 +85,7 @@ cd ClassRoomAI
 bun install
 ```
 
-If you downloaded a ZIP, skip the clone command. Private repositories require GitHub access.
+If you downloaded a ZIP, skip the clone command.
 
 4. Start the server.
 
